@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,22 +16,24 @@
 
 package com.hazelcast.test.starter;
 
-import com.hazelcast.internal.usercodedeployment.impl.ClassloadingMutexProvider;
-import com.hazelcast.util.FilteringClassLoader;
+import com.hazelcast.internal.util.ContextMutexFactory;
+import com.hazelcast.internal.util.FilteringClassLoader;
 
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Set;
 
-import static com.hazelcast.nio.IOUtil.closeResource;
-import static com.hazelcast.nio.IOUtil.toByteArray;
+import static com.hazelcast.internal.nio.IOUtil.closeResource;
+import static com.hazelcast.internal.nio.IOUtil.toByteArray;
 import static com.hazelcast.test.compatibility.SamplingSerializationService.isTestClass;
+import static com.hazelcast.test.starter.HazelcastStarterUtils.debug;
 import static java.util.Collections.enumeration;
 
 /**
@@ -49,13 +51,14 @@ public class HazelcastAPIDelegatingClassloader extends URLClassLoader {
 
     static final Set<String> DELEGATION_WHITE_LIST;
 
-    private ClassloadingMutexProvider mutexFactory = new ClassloadingMutexProvider();
+    private ContextMutexFactory mutexFactory = new ContextMutexFactory();
     private ClassLoader parent;
 
     static {
-        Set<String> alwaysDelegateWhiteList = new HashSet<String>();
+        Set<String> alwaysDelegateWhiteList = new HashSet<>();
         alwaysDelegateWhiteList.add("com.hazelcast.test.starter.ProxyInvocationHandler");
         alwaysDelegateWhiteList.add("com.hazelcast.test.starter.HazelcastAPIDelegatingClassloader");
+        alwaysDelegateWhiteList.add("com.hazelcast.internal.serialization.impl.SampleIdentifiedDataSerializable");
         DELEGATION_WHITE_LIST = Collections.unmodifiableSet(alwaysDelegateWhiteList);
     }
 
@@ -66,9 +69,9 @@ public class HazelcastAPIDelegatingClassloader extends URLClassLoader {
 
     @Override
     public Enumeration<URL> getResources(String name) throws IOException {
-        Utils.debug("Calling getResource with " + name);
+        debug("Calling getResource with %s", name);
         if (checkResourceExcluded(name)) {
-            return enumeration(Collections.<URL>emptyList());
+            return enumeration(Collections.emptyList());
         }
         if (name.contains("hazelcast")) {
             return findResources(name);
@@ -78,7 +81,7 @@ public class HazelcastAPIDelegatingClassloader extends URLClassLoader {
 
     @Override
     public URL getResource(String name) {
-        Utils.debug("Getting resource " + name);
+        debug("Getting resource %s", name);
         if (checkResourceExcluded(name)) {
             return null;
         }
@@ -102,7 +105,7 @@ public class HazelcastAPIDelegatingClassloader extends URLClassLoader {
         if (shouldDelegate(name)) {
             return super.loadClass(name, resolve);
         } else {
-            Closeable classMutex = mutexFactory.getMutexForClass(name);
+            Closeable classMutex = mutexFactory.mutexFor(name);
             try {
                 synchronized (classMutex) {
                     Class<?> loadedClass = findLoadedClass(name);
@@ -131,8 +134,6 @@ public class HazelcastAPIDelegatingClassloader extends URLClassLoader {
 
     /**
      * Attempts to locate a class' bytes as a resource in parent classpath, then loads the class in this classloader.
-     *
-     * @return
      */
     private Class<?> findClassInParentURLs(final String name) {
         String classFilePath = name.replaceAll("\\.", "/").concat(".class");
@@ -145,8 +146,7 @@ public class HazelcastAPIDelegatingClassloader extends URLClassLoader {
                 e.printStackTrace();
             }
             if (classBytes != null) {
-                Class<?> klass = this.defineClass(name, classBytes, 0, classBytes.length);
-                return klass;
+                return defineClass(name, classBytes, 0, classBytes.length);
             }
         }
         return null;
@@ -157,32 +157,20 @@ public class HazelcastAPIDelegatingClassloader extends URLClassLoader {
         if (name.startsWith("usercodedeployment")) {
             return false;
         }
-
         if (!name.startsWith("com.hazelcast")) {
             return true;
         }
-
-        if (DELEGATION_WHITE_LIST.contains(name)) {
-            return true;
-        }
-
-        return false;
+        return DELEGATION_WHITE_LIST.contains(name);
     }
 
     private boolean isHazelcastTestClass(String name) {
         if (name.startsWith("usercodedeployment")) {
             return true;
         }
-
         if (!name.startsWith("com.hazelcast")) {
             return false;
         }
-
-        if (isTestClass(name)) {
-            return true;
-        }
-
-        return false;
+        return isTestClass(name);
     }
 
     private void checkExcluded(String className) throws ClassNotFoundException {
@@ -192,7 +180,11 @@ public class HazelcastAPIDelegatingClassloader extends URLClassLoader {
     }
 
     private boolean checkResourceExcluded(String resourceName) {
-        return (parent instanceof FilteringClassLoader)
-                && ((FilteringClassLoader) parent).checkResourceExcluded(resourceName);
+        return (parent instanceof FilteringClassLoader) && ((FilteringClassLoader) parent).checkResourceExcluded(resourceName);
+    }
+
+    @Override
+    public String toString() {
+        return "HazelcastAPIDelegatingClassloader{urls = \"" + Arrays.toString(getURLs()) + "\"}";
     }
 }

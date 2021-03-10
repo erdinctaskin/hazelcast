@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,10 @@
 
 package com.hazelcast.internal.networking;
 
+import com.hazelcast.internal.serialization.Data;
+
 /**
- * Represents something that can be written to a {@link Channel}
+ * Represents a payload to can be written to a {@link Channel}
  *
  * There are different types of OutboundFrame:
  * <ol>
@@ -31,7 +33,7 @@ package com.hazelcast.internal.networking;
  *
  * There is no need for an InboundFrame interface.
  *
- * @see com.hazelcast.nio.serialization.Data
+ * @see Data
  * @see Channel#write(OutboundFrame)
  */
 public interface OutboundFrame {
@@ -47,4 +49,11 @@ public interface OutboundFrame {
      * @return true if urgent, false otherwise.
      */
     boolean isUrgent();
+
+    /**
+     * Returns the frame length. This includes header and payload size.
+     *
+     * @return The frame length.
+     */
+    int getFrameLength();
 }

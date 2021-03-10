@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,23 +16,26 @@
 
 package com.hazelcast.internal.serialization.impl;
 
+import com.hazelcast.internal.nio.Bits;
+import com.hazelcast.internal.nio.BufferObjectDataOutput;
+import com.hazelcast.internal.serialization.Data;
 import com.hazelcast.internal.serialization.InternalSerializationService;
-import com.hazelcast.nio.Bits;
-import com.hazelcast.nio.BufferObjectDataOutput;
-import com.hazelcast.nio.serialization.Data;
-import com.hazelcast.util.collection.ArrayUtils;
+import com.hazelcast.internal.serialization.SerializationService;
+import com.hazelcast.internal.util.collection.ArrayUtils;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 
-import static com.hazelcast.nio.Bits.CHAR_SIZE_IN_BYTES;
-import static com.hazelcast.nio.Bits.INT_SIZE_IN_BYTES;
-import static com.hazelcast.nio.Bits.LONG_SIZE_IN_BYTES;
-import static com.hazelcast.nio.Bits.NULL_ARRAY_LENGTH;
-import static com.hazelcast.nio.Bits.SHORT_SIZE_IN_BYTES;
+import static com.hazelcast.internal.nio.Bits.CHAR_SIZE_IN_BYTES;
+import static com.hazelcast.internal.nio.Bits.INT_SIZE_IN_BYTES;
+import static com.hazelcast.internal.nio.Bits.LONG_SIZE_IN_BYTES;
+import static com.hazelcast.internal.nio.Bits.NULL_ARRAY_LENGTH;
+import static com.hazelcast.internal.nio.Bits.SHORT_SIZE_IN_BYTES;
 import static com.hazelcast.version.Version.UNKNOWN;
 
-class ByteArrayObjectDataOutput extends VersionedObjectDataOutput implements BufferObjectDataOutput {
+public class ByteArrayObjectDataOutput extends VersionedObjectDataOutput implements BufferObjectDataOutput {
 
     final int initialSize;
 
@@ -248,15 +251,22 @@ class ByteArrayObjectDataOutput extends VersionedObjectDataOutput implements Buf
     }
 
     @Override
+    @Deprecated
     public void writeUTF(final String str) throws IOException {
-        int len = (str != null) ? str.length() : NULL_ARRAY_LENGTH;
-        writeInt(len);
-        if (len > 0) {
-            ensureAvailable(len * 3);
-            for (int i = 0; i < len; i++) {
-                pos += Bits.writeUtf8Char(buffer, pos, str.charAt(i));
-            }
+        writeString(str);
+    }
+
+    @Override
+    public void writeString(@Nullable String str) throws IOException {
+        if (str == null) {
+            writeInt(NULL_ARRAY_LENGTH);
+            return;
         }
+
+        byte[] utf8Bytes = str.getBytes(StandardCharsets.UTF_8);
+        writeInt(utf8Bytes.length);
+        ensureAvailable(utf8Bytes.length);
+        write(utf8Bytes);
     }
 
     @Override
@@ -346,12 +356,18 @@ class ByteArrayObjectDataOutput extends VersionedObjectDataOutput implements Buf
     }
 
     @Override
+    @Deprecated
     public void writeUTFArray(String[] strings) throws IOException {
+       writeStringArray(strings);
+    }
+
+    @Override
+    public void writeStringArray(@Nullable String[] strings) throws IOException {
         int len = strings != null ? strings.length : NULL_ARRAY_LENGTH;
         writeInt(len);
         if (len > 0) {
             for (String s : strings) {
-                writeUTF(s);
+                writeString(s);
             }
         }
     }
@@ -407,7 +423,7 @@ class ByteArrayObjectDataOutput extends VersionedObjectDataOutput implements Buf
     }
 
     @Override
-    public byte toByteArray()[] {
+    public byte[] toByteArray() {
         return toByteArray(0);
     }
 
@@ -429,6 +445,7 @@ class ByteArrayObjectDataOutput extends VersionedObjectDataOutput implements Buf
             buffer = new byte[initialSize * 8];
         }
         version = UNKNOWN;
+        wanProtocolVersion = UNKNOWN;
     }
 
     @Override
@@ -443,7 +460,7 @@ class ByteArrayObjectDataOutput extends VersionedObjectDataOutput implements Buf
     }
 
     @Override
-    public InternalSerializationService getSerializationService() {
+    public SerializationService getSerializationService() {
         return service;
     }
 

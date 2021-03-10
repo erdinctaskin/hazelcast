@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,28 +16,29 @@
 
 package com.hazelcast.map.impl;
 
-import com.hazelcast.concurrent.lock.LockService;
 import com.hazelcast.config.MapConfig;
-import com.hazelcast.internal.serialization.InternalSerializationService;
-import com.hazelcast.map.impl.query.IndexProvider;
+import com.hazelcast.internal.eviction.ExpirationManager;
+import com.hazelcast.internal.locksupport.LockSupportService;
+import com.hazelcast.internal.partition.IPartitionService;
+import com.hazelcast.internal.services.ObjectNamespace;
+import com.hazelcast.internal.services.ServiceNamespace;
+import com.hazelcast.internal.util.ConcurrencyUtil;
+import com.hazelcast.internal.util.ConstructorFunction;
+import com.hazelcast.internal.util.ContextMutexFactory;
+import com.hazelcast.internal.util.MapUtil;
+import com.hazelcast.map.impl.operation.MapClearExpiredOperation;
 import com.hazelcast.map.impl.recordstore.RecordStore;
 import com.hazelcast.query.impl.Indexes;
-import com.hazelcast.query.impl.getters.Extractors;
-import com.hazelcast.spi.ExecutionService;
-import com.hazelcast.spi.NodeEngine;
-import com.hazelcast.spi.ObjectNamespace;
-import com.hazelcast.spi.OperationService;
-import com.hazelcast.spi.ServiceNamespace;
-import com.hazelcast.spi.partition.IPartitionService;
-import com.hazelcast.spi.properties.GroupProperty;
+import com.hazelcast.spi.impl.NodeEngine;
+import com.hazelcast.spi.impl.executionservice.ExecutionService;
+import com.hazelcast.spi.impl.operationservice.OperationService;
+import com.hazelcast.spi.properties.ClusterProperty;
 import com.hazelcast.spi.properties.HazelcastProperties;
-import com.hazelcast.util.ConcurrencyUtil;
-import com.hazelcast.util.ConstructorFunction;
-import com.hazelcast.util.ContextMutexFactory;
 
 import javax.annotation.Nullable;
 import java.util.Collection;
-import java.util.HashSet;
+import java.util.Collections;
+import java.util.LinkedList;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -48,46 +49,30 @@ public class PartitionContainer {
     private final int partitionId;
     private final MapService mapService;
     private final ContextMutexFactory contextMutexFactory = new ContextMutexFactory();
-    private final ConcurrentMap<String, RecordStore> maps = new ConcurrentHashMap<String, RecordStore>(1000);
-    private final ConcurrentMap<String, Indexes> indexes = new ConcurrentHashMap<String, Indexes>(10);
+    private final ConcurrentMap<String, RecordStore> maps;
+    private final ConcurrentMap<String, Indexes> indexes = new ConcurrentHashMap<>();
     private final ConstructorFunction<String, RecordStore> recordStoreConstructor
-            = new ConstructorFunction<String, RecordStore>() {
-
-        @Override
-        public RecordStore createNew(String name) {
-            RecordStore recordStore = createRecordStore(name);
-            recordStore.startLoading();
-            return recordStore;
-        }
+            = name -> {
+        RecordStore recordStore = createRecordStore(name);
+        recordStore.startLoading();
+        return recordStore;
     };
     private final ConstructorFunction<String, RecordStore> recordStoreConstructorSkipLoading
-            = new ConstructorFunction<String, RecordStore>() {
-
-        @Override
-        public RecordStore createNew(String name) {
-            return createRecordStore(name);
-        }
-    };
+            = this::createRecordStore;
 
     private final ConstructorFunction<String, RecordStore> recordStoreConstructorForHotRestart
-            = new ConstructorFunction<String, RecordStore>() {
-
-        @Override
-        public RecordStore createNew(String name) {
-            return createRecordStore(name);
-        }
-    };
+            = this::createRecordStore;
     /**
-     * Flag to check if there is a {@link com.hazelcast.map.impl.operation.ClearExpiredOperation}
+     * Flag to check if there is a {@link MapClearExpiredOperation}
      * running on this partition at this moment or not.
      */
     private volatile boolean hasRunningCleanup;
     private volatile long lastCleanupTime;
 
     /**
-     * Used when sorting partition containers in {@link com.hazelcast.map.impl.eviction.ExpirationManager}
+     * Used when sorting partition containers in {@link ExpirationManager}
      * A non-volatile copy of lastCleanupTime is used with two reasons.
-     * <p/>
+     * <p>
      * 1. We need an un-modified field during sorting.
      * 2. Decrease number of volatile reads.
      */
@@ -96,6 +81,8 @@ public class PartitionContainer {
     public PartitionContainer(final MapService mapService, final int partitionId) {
         this.mapService = mapService;
         this.partitionId = partitionId;
+        int approxMapCount = mapService.mapServiceContext.getNodeEngine().getConfig().getMapConfigs().size();
+        this.maps = MapUtil.createConcurrentHashMap(approxMapCount);
     }
 
     private RecordStore createRecordStore(String name) {
@@ -109,17 +96,14 @@ public class PartitionContainer {
         HazelcastProperties hazelcastProperties = nodeEngine.getProperties();
 
         MapKeyLoader keyLoader = new MapKeyLoader(name, opService, ps, nodeEngine.getClusterService(),
-                execService, mapContainer.toData());
-        keyLoader.setMaxBatch(hazelcastProperties.getInteger(GroupProperty.MAP_LOAD_CHUNK_SIZE));
-        keyLoader.setMaxSize(getMaxSizePerNode(mapConfig.getMaxSizeConfig()));
+                execService, mapContainer.toData(), serviceContext.getNodeWideLoadedKeyLimiter());
+        keyLoader.setMaxBatch(hazelcastProperties.getInteger(ClusterProperty.MAP_LOAD_CHUNK_SIZE));
+        keyLoader.setMaxSize(getMaxSizePerNode(mapConfig.getEvictionConfig()));
         keyLoader.setHasBackup(mapConfig.getTotalBackupCount() > 0);
         keyLoader.setMapOperationProvider(serviceContext.getMapOperationProvider(name));
 
-        InternalSerializationService ss = (InternalSerializationService) nodeEngine.getSerializationService();
-        IndexProvider indexProvider = serviceContext.getIndexProvider(mapConfig);
         if (!mapContainer.isGlobalIndexEnabled()) {
-            Indexes indexesForMap = new Indexes(ss, indexProvider, mapContainer.getExtractors(), false,
-                    serviceContext.getIndexCopyBehavior());
+            Indexes indexesForMap = mapContainer.createIndexes(false);
             indexes.putIfAbsent(name, indexesForMap);
         }
         RecordStore recordStore = serviceContext.createRecordStore(mapContainer, partitionId, keyLoader);
@@ -136,19 +120,26 @@ public class PartitionContainer {
     }
 
     public Collection<RecordStore> getAllRecordStores() {
-        return maps.values();
+        return maps.isEmpty() ? Collections.emptyList() : maps.values();
     }
 
     public Collection<ServiceNamespace> getAllNamespaces(int replicaIndex) {
-        Collection<ServiceNamespace> namespaces = new HashSet<ServiceNamespace>();
+        if (maps.isEmpty()) {
+            return Collections.emptyList();
+        }
 
+        Collection<ServiceNamespace> namespaces = Collections.EMPTY_LIST;
         for (RecordStore recordStore : maps.values()) {
             MapContainer mapContainer = recordStore.getMapContainer();
             MapConfig mapConfig = mapContainer.getMapConfig();
+
             if (mapConfig.getTotalBackupCount() < replicaIndex) {
                 continue;
             }
 
+            if (namespaces == Collections.EMPTY_LIST) {
+                namespaces = new LinkedList<>();
+            }
             namespaces.add(mapContainer.getObjectNamespace());
         }
 
@@ -182,6 +173,11 @@ public class PartitionContainer {
     }
 
     public void destroyMap(MapContainer mapContainer) {
+        // Mark map container destroyed before the underlying data structures are destroyed. We need this to ensure that every
+        // reader that observed non-destroyed state may use previously read data. E.g. if the reader returned only Key1 it
+        // is guaranteed that it hadn't missed Key2 because it was destroyed earlier.
+        mapContainer.onBeforeDestroy();
+
         String name = mapContainer.getName();
         RecordStore recordStore = maps.remove(name);
         if (recordStore != null) {
@@ -206,20 +202,11 @@ public class PartitionContainer {
 
     private void clearLockStore(String name) {
         final NodeEngine nodeEngine = mapService.getMapServiceContext().getNodeEngine();
-        final LockService lockService = nodeEngine.getSharedService(LockService.SERVICE_NAME);
+        final LockSupportService lockService = nodeEngine.getServiceOrNull(LockSupportService.SERVICE_NAME);
         if (lockService != null) {
             final ObjectNamespace namespace = MapService.getObjectNamespace(name);
             lockService.clearLockStore(partitionId, namespace);
         }
-    }
-
-    public void clear(boolean onShutdown) {
-        for (RecordStore recordStore : maps.values()) {
-            recordStore.clearPartition(onShutdown);
-            mapService.getMapServiceContext().getEventJournal().destroy(
-                    recordStore.getMapContainer().getObjectNamespace(), partitionId);
-        }
-        maps.clear();
     }
 
     public boolean hasRunningCleanup() {
@@ -260,11 +247,7 @@ public class PartitionContainer {
                 throw new IllegalStateException("Can't use a partitioned-index in the context of a global-index.");
             }
 
-            InternalSerializationService ss = (InternalSerializationService)
-                    mapServiceContext.getNodeEngine().getSerializationService();
-            Extractors extractors = mapServiceContext.getMapContainer(name).getExtractors();
-            IndexProvider indexProvider = mapServiceContext.getIndexProvider(mapContainer.getMapConfig());
-            Indexes indexesForMap = new Indexes(ss, indexProvider, extractors, false, mapServiceContext.getIndexCopyBehavior());
+            Indexes indexesForMap = mapContainer.createIndexes(false);
             ixs = indexes.putIfAbsent(name, indexesForMap);
             if (ixs == null) {
                 ixs = indexesForMap;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,11 +20,12 @@ import com.hazelcast.aggregation.Aggregator;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
+import com.hazelcast.query.impl.Comparables;
 
 import java.io.IOException;
+import java.util.Objects;
 
-public final class MaxByAggregator<I> extends AbstractAggregator<I, Comparable, I>
-        implements IdentifiedDataSerializable {
+public final class MaxByAggregator<I> extends AbstractAggregator<I, Comparable, I> implements IdentifiedDataSerializable {
 
     private Comparable maxValue;
     private I maxEntry;
@@ -49,9 +50,10 @@ public final class MaxByAggregator<I> extends AbstractAggregator<I, Comparable, 
         if (otherValue == null) {
             return false;
         }
-        return maxValue == null || maxValue.compareTo(otherValue) < 0;
+        return maxValue == null || Comparables.compare(maxValue, otherValue) < 0;
     }
 
+    @SuppressWarnings("unchecked")
     @Override
     public void combine(Aggregator aggregator) {
         MaxByAggregator<I> maxAggregator = (MaxByAggregator<I>) aggregator;
@@ -73,21 +75,41 @@ public final class MaxByAggregator<I> extends AbstractAggregator<I, Comparable, 
     }
 
     @Override
-    public int getId() {
+    public int getClassId() {
         return AggregatorDataSerializerHook.MAX_BY;
     }
 
     @Override
     public void writeData(ObjectDataOutput out) throws IOException {
-        out.writeUTF(attributePath);
+        out.writeString(attributePath);
         out.writeObject(maxValue);
         out.writeObject(maxEntry);
     }
 
     @Override
     public void readData(ObjectDataInput in) throws IOException {
-        this.attributePath = in.readUTF();
+        this.attributePath = in.readString();
         this.maxValue = in.readObject();
         this.maxEntry = in.readObject();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        if (!super.equals(o)) {
+            return false;
+        }
+        MaxByAggregator<?> that = (MaxByAggregator<?>) o;
+        return Objects.equals(maxValue, that.maxValue) && Objects.equals(maxEntry, that.maxEntry);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(super.hashCode(), maxValue, maxEntry);
     }
 }

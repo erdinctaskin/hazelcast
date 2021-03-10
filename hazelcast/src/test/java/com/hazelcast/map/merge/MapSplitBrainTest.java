@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ import com.hazelcast.config.Config;
 import com.hazelcast.config.InMemoryFormat;
 import com.hazelcast.config.MergePolicyConfig;
 import com.hazelcast.core.HazelcastInstance;
-import com.hazelcast.core.IMap;
+import com.hazelcast.map.IMap;
 import com.hazelcast.spi.merge.DiscardMergePolicy;
 import com.hazelcast.spi.merge.HigherHitsMergePolicy;
 import com.hazelcast.spi.merge.LatestAccessMergePolicy;
@@ -30,7 +30,7 @@ import com.hazelcast.spi.merge.PutIfAbsentMergePolicy;
 import com.hazelcast.spi.merge.SplitBrainMergePolicy;
 import com.hazelcast.test.HazelcastParallelParametersRunnerFactory;
 import com.hazelcast.test.SplitBrainTestSupport;
-import com.hazelcast.test.annotation.ParallelTest;
+import com.hazelcast.test.annotation.ParallelJVMTest;
 import com.hazelcast.test.annotation.QuickTest;
 import com.hazelcast.test.backup.BackupAccessor;
 import com.hazelcast.test.backup.TestBackupUtils;
@@ -66,7 +66,7 @@ import static org.junit.Assert.fail;
  */
 @RunWith(Parameterized.class)
 @UseParametersRunnerFactory(HazelcastParallelParametersRunnerFactory.class)
-@Category({QuickTest.class, ParallelTest.class})
+@Category({QuickTest.class, ParallelJVMTest.class})
 @SuppressWarnings("WeakerAccess")
 public class MapSplitBrainTest extends SplitBrainTestSupport {
 
@@ -121,13 +121,15 @@ public class MapSplitBrainTest extends SplitBrainTestSupport {
                 .setMergePolicyConfig(mergePolicyConfig)
                 .setBackupCount(1)
                 .setAsyncBackupCount(0)
-                .setStatisticsEnabled(false);
+                .setStatisticsEnabled(true)
+                .setPerEntryStatsEnabled(true);
         config.getMapConfig(mapNameB)
                 .setInMemoryFormat(inMemoryFormat)
                 .setMergePolicyConfig(mergePolicyConfig)
                 .setBackupCount(1)
                 .setAsyncBackupCount(0)
-                .setStatisticsEnabled(false);
+                .setStatisticsEnabled(true)
+                .setPerEntryStatsEnabled(true);
         return config;
     }
 
@@ -265,7 +267,7 @@ public class MapSplitBrainTest extends SplitBrainTestSupport {
         assertEquals("value1", mapA1.get("key1"));
 
         // prevent updating at the same time
-        sleepAtLeastMillis(100);
+        sleepAtLeastMillis(1000);
 
         mapA2.put("key1", "LatestAccessedValue1");
         // access to record
@@ -276,7 +278,7 @@ public class MapSplitBrainTest extends SplitBrainTestSupport {
         assertEquals("value2", mapA2.get("key2"));
 
         // prevent updating at the same time
-        sleepAtLeastMillis(100);
+        sleepAtLeastMillis(1000);
 
         mapA1.put("key2", "LatestAccessedValue2");
         // access to record
@@ -301,13 +303,13 @@ public class MapSplitBrainTest extends SplitBrainTestSupport {
         mapA1.put("key1", "value1");
 
         // prevent updating at the same time
-        sleepAtLeastMillis(100);
+        sleepAtLeastMillis(1000);
 
         mapA2.put("key1", "LatestUpdatedValue1");
         mapA2.put("key2", "value2");
 
         // prevent updating at the same time
-        sleepAtLeastMillis(100);
+        sleepAtLeastMillis(1000);
 
         mapA1.put("key2", "LatestUpdatedValue2");
     }

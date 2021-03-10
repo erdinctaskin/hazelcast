@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,12 @@
 
 package com.hazelcast.config;
 
-import com.hazelcast.util.StringUtil;
+import com.hazelcast.security.jsm.HazelcastRuntimePermission;
+import com.hazelcast.internal.util.StringUtil;
 
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.Objects;
 
 /**
  * Contains configuration for Network.
@@ -64,6 +66,10 @@ public class NetworkConfig {
 
     private IcmpFailureDetectorConfig icmpFailureDetectorConfig;
 
+    private RestApiConfig restApiConfig = new RestApiConfig();
+
+    private MemcacheProtocolConfig memcacheProtocolConfig = new MemcacheProtocolConfig();
+
     public NetworkConfig() {
         String os = StringUtil.lowerCaseInternal(System.getProperty("os.name"));
         reuseAddress = (!os.contains("win"));
@@ -82,7 +88,7 @@ public class NetworkConfig {
 
     /**
      * Sets the port the Hazelcast member will try to bind on.
-     *
+     * <p>
      * A valid port value is between 0 and 65535.
      * A port number of 0 will let the system pick up an ephemeral port.
      *
@@ -114,13 +120,15 @@ public class NetworkConfig {
      * The maximum number of ports allowed to use.
      *
      * @param portCount the maximum number of ports allowed to use
+     * @return this configuration
      * @see #setPortAutoIncrement(boolean) for more information
      */
-    public void setPortCount(int portCount) {
+    public NetworkConfig setPortCount(int portCount) {
         if (portCount < 1) {
             throw new IllegalArgumentException("port count can't be smaller than 0");
         }
         this.portCount = portCount;
+        return this;
     }
 
     /**
@@ -310,9 +318,15 @@ public class NetworkConfig {
      * Returns the current {@link SSLConfig}. It is possible that null is returned if no SSLConfig has been set.
      *
      * @return the SSLConfig
+     * @throws SecurityException If a security manager exists and the calling method doesn't have corresponding
+     *                           {@link HazelcastRuntimePermission}
      * @see #setSSLConfig(SSLConfig)
      */
     public SSLConfig getSSLConfig() {
+        SecurityManager sm = System.getSecurityManager();
+        if (sm != null) {
+            sm.checkPermission(new HazelcastRuntimePermission("com.hazelcast.config.NetworkConfig.getSSLConfig"));
+        }
         return sslConfig;
     }
 
@@ -321,9 +335,15 @@ public class NetworkConfig {
      *
      * @param sslConfig the SSLConfig
      * @return the updated NetworkConfig
+     * @throws SecurityException If a security manager exists and the calling method doesn't have corresponding
+     *                           {@link HazelcastRuntimePermission}
      * @see #getSSLConfig()
      */
     public NetworkConfig setSSLConfig(SSLConfig sslConfig) {
+        SecurityManager sm = System.getSecurityManager();
+        if (sm != null) {
+            sm.checkPermission(new HazelcastRuntimePermission("com.hazelcast.config.NetworkConfig.setSSLConfig"));
+        }
         this.sslConfig = sslConfig;
         return this;
     }
@@ -360,6 +380,24 @@ public class NetworkConfig {
         return icmpFailureDetectorConfig;
     }
 
+    public RestApiConfig getRestApiConfig() {
+        return restApiConfig;
+    }
+
+    public NetworkConfig setRestApiConfig(RestApiConfig restApiConfig) {
+        this.restApiConfig = restApiConfig;
+        return this;
+    }
+
+    public MemcacheProtocolConfig getMemcacheProtocolConfig() {
+        return memcacheProtocolConfig;
+    }
+
+    public NetworkConfig setMemcacheProtocolConfig(MemcacheProtocolConfig memcacheProtocolConfig) {
+        this.memcacheProtocolConfig = memcacheProtocolConfig;
+        return this;
+    }
+
     @Override
     public String toString() {
         return "NetworkConfig{"
@@ -373,6 +411,41 @@ public class NetworkConfig {
                 + ", socketInterceptorConfig=" + socketInterceptorConfig
                 + ", symmetricEncryptionConfig=" + symmetricEncryptionConfig
                 + ", icmpFailureDetectorConfig=" + icmpFailureDetectorConfig
+                + ", restApiConfig=" + restApiConfig
+                + ", memcacheProtocolConfig=" + memcacheProtocolConfig
                 + '}';
+    }
+
+    @Override
+    @SuppressWarnings("checkstyle:CyclomaticComplexity")
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        NetworkConfig that = (NetworkConfig) o;
+        return port == that.port && portCount == that.portCount && portAutoIncrement == that.portAutoIncrement
+                && reuseAddress == that.reuseAddress && Objects.equals(publicAddress, that.publicAddress)
+                && Objects.equals(outboundPortDefinitions, that.outboundPortDefinitions)
+                && Objects.equals(outboundPorts, that.outboundPorts)
+                && Objects.equals(interfaces, that.interfaces) && Objects.equals(join, that.join)
+                && Objects.equals(symmetricEncryptionConfig, that.symmetricEncryptionConfig)
+                && Objects.equals(socketInterceptorConfig, that.socketInterceptorConfig)
+                && Objects.equals(sslConfig, that.sslConfig)
+                && Objects.equals(memberAddressProviderConfig, that.memberAddressProviderConfig)
+                && Objects.equals(icmpFailureDetectorConfig, that.icmpFailureDetectorConfig)
+                && Objects.equals(restApiConfig, that.restApiConfig)
+                && Objects.equals(memcacheProtocolConfig, that.memcacheProtocolConfig);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects
+                .hash(port, portCount, portAutoIncrement, reuseAddress, publicAddress, outboundPortDefinitions, outboundPorts,
+                        interfaces, join, symmetricEncryptionConfig, socketInterceptorConfig, sslConfig,
+                        memberAddressProviderConfig,
+                        icmpFailureDetectorConfig, restApiConfig, memcacheProtocolConfig);
     }
 }

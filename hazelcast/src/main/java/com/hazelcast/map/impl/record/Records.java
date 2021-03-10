@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,49 +16,96 @@
 
 package com.hazelcast.map.impl.record;
 
-import com.hazelcast.nio.serialization.Data;
-import com.hazelcast.spi.serialization.SerializationService;
+import com.hazelcast.internal.cluster.Versions;
+import com.hazelcast.internal.serialization.Data;
+import com.hazelcast.internal.serialization.SerializationService;
+import com.hazelcast.map.impl.recordstore.expiry.ExpiryMetadata;
+import com.hazelcast.nio.ObjectDataInput;
+import com.hazelcast.nio.ObjectDataOutput;
+import com.hazelcast.version.Version;
+
+import java.io.IOException;
+import java.util.EnumMap;
+import java.util.Map;
 
 import static com.hazelcast.map.impl.record.Record.NOT_CACHED;
+import static com.hazelcast.map.impl.record.RecordReaderWriter.DATA_RECORD_READER_WRITER;
+import static com.hazelcast.map.impl.record.RecordReaderWriter.DATA_RECORD_WITH_STATS_READER_WRITER;
+import static com.hazelcast.map.impl.record.RecordReaderWriter.SIMPLE_DATA_RECORD_READER_WRITER;
+import static com.hazelcast.map.impl.record.RecordReaderWriter.SIMPLE_DATA_RECORD_WITH_LFU_EVICTION_READER_WRITER;
+import static com.hazelcast.map.impl.record.RecordReaderWriter.SIMPLE_DATA_RECORD_WITH_LRU_EVICTION_READER_WRITER;
+import static com.hazelcast.map.impl.record.RecordReaderWriter.getById;
 
 /**
- * Contains various factory & helper methods for a {@link com.hazelcast.map.impl.record.Record} object.
+ * Contains various factory &amp; helper methods for a {@link
+ * com.hazelcast.map.impl.record.Record} object.
  */
 public final class Records {
+
+    // RU_COMPAT_4_1
+    /**
+     * Maps RecordReaderWriter objects to their 4.1 equivalents. This is used to
+     * support compatibility between 4.1 and 4.2 during rolling upgrades.
+     */
+    private static final Map<RecordReaderWriter, RecordReaderWriter> RU_COMPAT_MAP = createAndInitRuCompatMap();
 
     private Records() {
     }
 
-    public static void applyRecordInfo(Record record, RecordInfo replicationInfo) {
-        record.setVersion(replicationInfo.getVersion());
-        record.setHits(replicationInfo.getHits());
-        record.setTtl(replicationInfo.getTtl());
-        record.setCreationTime(replicationInfo.getCreationTime());
-        record.setLastAccessTime(replicationInfo.getLastAccessTime());
-        record.setLastUpdateTime(replicationInfo.getLastUpdateTime());
-        record.setExpirationTime(replicationInfo.getExpirationTime());
-        record.setLastStoredTime(replicationInfo.getLastStoredTime());
+    private static EnumMap<RecordReaderWriter, RecordReaderWriter> createAndInitRuCompatMap() {
+        EnumMap<RecordReaderWriter, RecordReaderWriter> ruCompatMap = new EnumMap<>(RecordReaderWriter.class);
+        ruCompatMap.put(SIMPLE_DATA_RECORD_READER_WRITER, DATA_RECORD_READER_WRITER);
+        ruCompatMap.put(SIMPLE_DATA_RECORD_WITH_LFU_EVICTION_READER_WRITER, DATA_RECORD_READER_WRITER);
+        ruCompatMap.put(SIMPLE_DATA_RECORD_WITH_LRU_EVICTION_READER_WRITER, DATA_RECORD_READER_WRITER);
+        ruCompatMap.put(DATA_RECORD_READER_WRITER, DATA_RECORD_READER_WRITER);
+        ruCompatMap.put(DATA_RECORD_WITH_STATS_READER_WRITER, DATA_RECORD_WITH_STATS_READER_WRITER);
+
+        assert ruCompatMap.size() == RecordReaderWriter.values().length
+                : "Missing enum mapping for RU compatibility";
+
+        return ruCompatMap;
     }
 
-    public static RecordInfo buildRecordInfo(Record record) {
-        RecordInfo info = new RecordInfo();
+    public static void writeRecord(ObjectDataOutput out, Record record,
+                                   Data dataValue, ExpiryMetadata expiryMetadata) throws IOException {
+        RecordReaderWriter readerWriter = record.getMatchingRecordReaderWriter();
+        // RU_COMPAT_4_1
+        Version version = out.getVersion();
+        if (version.isUnknownOrLessThan(Versions.V4_2)) {
+            readerWriter = RU_COMPAT_MAP.get(readerWriter);
+        }
 
-        info.setVersion(record.getVersion());
-        info.setHits(record.getHits());
-        info.setCreationTime(record.getCreationTime());
-        info.setLastAccessTime(record.getLastAccessTime());
-        info.setLastUpdateTime(record.getLastUpdateTime());
-        info.setTtl(record.getTtl());
-        info.setExpirationTime(record.getExpirationTime());
-        info.setLastStoredTime(record.getLastStoredTime());
+        out.writeByte(readerWriter.getId());
+        readerWriter.writeRecord(out, record, dataValue, expiryMetadata);
+    }
 
-        return info;
+    public static Record readRecord(ObjectDataInput in,
+                                    ExpiryMetadata expiryMetadata) throws IOException {
+        byte matchingDataRecordId = in.readByte();
+        return getById(matchingDataRecordId).readRecord(in, expiryMetadata);
+    }
+
+    /**
+     * Except transient field {@link com.hazelcast.query.impl.Metadata},
+     * all record-metadata is copied from one record to another.
+     *
+     * @return populated record object with new metadata
+     */
+    public static Record copyMetadataFrom(Record fromRecord, Record toRecord) {
+        toRecord.setHits(fromRecord.getHits());
+        toRecord.setVersion(fromRecord.getVersion());
+        toRecord.setCreationTime(fromRecord.getCreationTime());
+        toRecord.setLastAccessTime(fromRecord.getLastAccessTime());
+        toRecord.setLastStoredTime(fromRecord.getLastStoredTime());
+        toRecord.setLastUpdateTime(fromRecord.getLastUpdateTime());
+        return toRecord;
     }
 
     /**
      * Get current cached value from the record.
-     * This method protects you against accidental exposure of cached value mutex into rest of the code.
-     * <p/>
+     * This method protects you against accidental exposure
+     * of cached value mutex into rest of the code.
+     * <p>
      * Use it instead of raw {@link Record#getCachedValueUnsafe()} See
      * {@link #getValueOrCachedValue(Record, SerializationService)}
      * for details.
@@ -81,22 +128,27 @@ public final class Records {
     }
 
     /**
-     * Return cached value where appropriate, otherwise return the actual value.
+     * Return cached value where appropriate,
+     * otherwise return the actual value.
      * Value caching makes sense when:
      * <ul>
-     * <li>Portable serialization is not used</li>
      * <li>OBJECT InMemoryFormat is not used</li>
+     * <li>Portable serialization is not used</li>
+     * <li>HazelcastJsonValue objects are not used</li>
      * </ul>
-     * <p/>
-     * If Record does not contain cached value and is found appropriate (see above) then new cache value is created
+     * <p>
+     * If Record does not contain cached value and is found
+     * appropriate (see above) then new cache value is created
      * by de-serializing the {@link Record#getValue()}
-     * <p/>
-     * The newly de-deserialized value may not be stored into the Record cache when the record has been modified
-     * while the method was running.
-     * <p/>
-     * WARNING: This method may temporarily set an arbitrary object into the Record cache - this object acts as mutex.
-     * The mutex should never be returned to the outside world. Use {@link #getCachedValue(Record)} instead of raw
-     * {@link Record#getCachedValueUnsafe()} to protect from accidental mutex exposure to the user-code.
+     * <p>
+     * The newly de-deserialized value may not be stored into the Record
+     * cache when the record has been modified while the method was running.
+     * <p>
+     * WARNING: This method may temporarily set an arbitrary object into the
+     * Record cache - this object acts as mutex. The mutex should never be
+     * returned to the outside world. Use {@link #getCachedValue(Record)}
+     * instead of raw {@link Record#getCachedValueUnsafe()} to
+     * protect from accidental mutex exposure to the user-code.
      *
      * @param record
      * @param serializationService
@@ -146,7 +198,13 @@ public final class Records {
 
         //we managed to lock the record for ourselves
         Object valueAfterCas = record.getValue();
-        Object object = serializationService.toObject(valueBeforeCas);
+        Object object = null;
+        try {
+            object = serializationService.toObject(valueBeforeCas);
+        } catch (Exception e) {
+            record.casCachedValue(currentThread, null);
+            throw e;
+        }
         if (valueAfterCas == valueBeforeCas) {
             //this check is needed to make sure a partition thread had not changed the value
             //right before we won the CAS
@@ -166,7 +224,11 @@ public final class Records {
     }
 
     static boolean shouldCache(Object value) {
-        return value instanceof Data && !((Data) value).isPortable();
+        // For portables, we cannot extract information from the deserialized form.
+        // For HazelcastJsonValue objects, if we pass the instanceof Data check, that
+        // means the metadata is created from the Data representation of the object.
+        // If we allow using the deserialized values, the metadata might not be safe to use.
+        return value instanceof Data && !((Data) value).isPortable() && !((Data) value).isJson();
     }
 
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,16 +20,18 @@ import com.hazelcast.cache.impl.CacheDataSerializerHook;
 import com.hazelcast.cache.impl.CachePartitionSegment;
 import com.hazelcast.cache.impl.ICacheRecordStore;
 import com.hazelcast.cache.impl.ICacheService;
+import com.hazelcast.cache.impl.PreJoinCacheConfig;
 import com.hazelcast.cache.impl.record.CacheRecord;
 import com.hazelcast.config.CacheConfig;
+import com.hazelcast.internal.cluster.Versions;
+import com.hazelcast.internal.nio.IOUtil;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
-import com.hazelcast.nio.serialization.Data;
+import com.hazelcast.internal.serialization.Data;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
-import com.hazelcast.spi.ObjectNamespace;
-import com.hazelcast.spi.Operation;
-import com.hazelcast.spi.ServiceNamespace;
-import com.hazelcast.util.Clock;
+import com.hazelcast.internal.services.ObjectNamespace;
+import com.hazelcast.spi.impl.operationservice.Operation;
+import com.hazelcast.internal.services.ServiceNamespace;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -40,7 +42,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-import static com.hazelcast.util.MapUtil.createHashMap;
+import static com.hazelcast.internal.util.MapUtil.createHashMap;
+import com.hazelcast.nio.serialization.impl.Versioned;
 
 /**
  * Replication operation is the data migration operation of {@link com.hazelcast.cache.impl.CacheRecordStore}.
@@ -54,20 +57,22 @@ import static com.hazelcast.util.MapUtil.createHashMap;
  * <li>Create the configuration in the new node service.</li>
  * <li>Insert each record into {@link ICacheRecordStore}.</li>
  * </ul>
- * </p>
  * <p><b>Note:</b> This operation is a per partition operation.</p>
  */
-public class CacheReplicationOperation extends Operation implements IdentifiedDataSerializable {
+public class CacheReplicationOperation extends Operation implements IdentifiedDataSerializable, Versioned {
 
     private final List<CacheConfig> configs = new ArrayList<CacheConfig>();
     private final Map<String, Map<Data, CacheRecord>> data = new HashMap<String, Map<Data, CacheRecord>>();
-    private final CacheNearCacheStateHolder nearCacheStateHolder = new CacheNearCacheStateHolder(this);
+    private CacheNearCacheStateHolder nearCacheStateHolder;
+    private transient boolean classesAlwaysAvailable = true;
 
     public CacheReplicationOperation() {
+        nearCacheStateHolder = new CacheNearCacheStateHolder();
+        nearCacheStateHolder.setCacheReplicationOperation(this);
     }
 
     public final void prepare(CachePartitionSegment segment, Collection<ServiceNamespace> namespaces,
-            int replicaIndex) {
+                              int replicaIndex) {
 
         for (ServiceNamespace namespace : namespaces) {
             ObjectNamespace ns = (ObjectNamespace) namespace;
@@ -84,6 +89,10 @@ public class CacheReplicationOperation extends Operation implements IdentifiedDa
 
         configs.addAll(segment.getCacheConfigs());
         nearCacheStateHolder.prepare(segment, namespaces);
+        classesAlwaysAvailable = segment.getCacheService().getNodeEngine()
+                .getTenantControlService()
+                .getTenantControlFactory()
+                .isClassesAlwaysAvailable();
     }
 
     protected void storeRecordsToReplicate(ICacheRecordStore recordStore) {
@@ -103,7 +112,8 @@ public class CacheReplicationOperation extends Operation implements IdentifiedDa
     public void run() throws Exception {
         ICacheService service = getService();
         for (Map.Entry<String, Map<Data, CacheRecord>> entry : data.entrySet()) {
-            ICacheRecordStore cache = service.getOrCreateRecordStore(entry.getKey(), getPartitionId());
+            ICacheRecordStore cache;
+            cache = service.getOrCreateRecordStore(entry.getKey(), getPartitionId());
             cache.reset();
             Map<Data, CacheRecord> map = entry.getValue();
 
@@ -140,34 +150,35 @@ public class CacheReplicationOperation extends Operation implements IdentifiedDa
         int confSize = configs.size();
         out.writeInt(confSize);
         for (CacheConfig config : configs) {
-            out.writeObject(config);
+            // RU_COMPAT_4_1
+            if (out.getVersion().isGreaterOrEqual(Versions.V4_2) && !classesAlwaysAvailable) {
+                out.writeObject(PreJoinCacheConfig.of(config));
+            } else {
+                out.writeObject(config);
+            }
         }
         int count = data.size();
         out.writeInt(count);
-        long now = Clock.currentTimeMillis();
         for (Map.Entry<String, Map<Data, CacheRecord>> entry : data.entrySet()) {
             Map<Data, CacheRecord> cacheMap = entry.getValue();
             int subCount = cacheMap.size();
             out.writeInt(subCount);
-            out.writeUTF(entry.getKey());
+            out.writeString(entry.getKey());
             for (Map.Entry<Data, CacheRecord> e : cacheMap.entrySet()) {
                 final Data key = e.getKey();
                 final CacheRecord record = e.getValue();
 
-                if (record.isExpiredAt(now)) {
-                    continue;
-                }
-                out.writeData(key);
+                IOUtil.writeData(out, key);
                 out.writeObject(record);
             }
             // Empty data will terminate the iteration for read in case
             // expired entries were found while serializing, since the
             // real subCount will then be different from the one written
             // before
-            out.writeData(null);
+            IOUtil.writeData(out, null);
         }
 
-        nearCacheStateHolder.writeData(out);
+        out.writeObject(nearCacheStateHolder);
     }
 
     @Override
@@ -177,18 +188,23 @@ public class CacheReplicationOperation extends Operation implements IdentifiedDa
         int confSize = in.readInt();
         for (int i = 0; i < confSize; i++) {
             final CacheConfig config = in.readObject();
-            configs.add(config);
+            // RU_COMPAT_4_1
+            if (in.getVersion().isGreaterOrEqual(Versions.V4_2) && !classesAlwaysAvailable) {
+                configs.add(PreJoinCacheConfig.asCacheConfig(config));
+            } else {
+                configs.add(config);
+            }
         }
         int count = in.readInt();
         for (int i = 0; i < count; i++) {
             int subCount = in.readInt();
-            String name = in.readUTF();
+            String name = in.readString();
             Map<Data, CacheRecord> m = createHashMap(subCount);
             data.put(name, m);
             // subCount + 1 because of the DefaultData written as the last entry
             // which adds another Data entry at the end of the stream!
             for (int j = 0; j < subCount + 1; j++) {
-                Data key = in.readData();
+                Data key = IOUtil.readData(in);
                 // Empty data received so reading can be stopped here since
                 // since the real object subCount might be different from
                 // the number on the stream due to found expired entries
@@ -200,7 +216,8 @@ public class CacheReplicationOperation extends Operation implements IdentifiedDa
             }
         }
 
-        nearCacheStateHolder.readData(in);
+        nearCacheStateHolder = in.readObject();
+        nearCacheStateHolder.setCacheReplicationOperation(this);
     }
 
     public boolean isEmpty() {
@@ -217,7 +234,12 @@ public class CacheReplicationOperation extends Operation implements IdentifiedDa
     }
 
     @Override
-    public int getId() {
+    public int getClassId() {
         return CacheDataSerializerHook.CACHE_REPLICATION;
+    }
+
+    @Override
+    public boolean requiresTenantContext() {
+        return true;
     }
 }

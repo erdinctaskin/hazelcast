@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,61 +16,54 @@
 
 package com.hazelcast.internal.partition;
 
-import com.hazelcast.nio.Address;
-import com.hazelcast.nio.ObjectDataInput;
-import com.hazelcast.nio.ObjectDataOutput;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
-import java.io.IOException;
 import java.util.Arrays;
 
-import static com.hazelcast.internal.partition.InternalPartition.MAX_REPLICA_COUNT;
+import static com.hazelcast.internal.partition.PartitionStamp.calculateStamp;
 
 /**
  * An immutable/readonly view of partition table.
- * View consists of partition replica assignments and global partition state version.
+ * View consists of partition replica assignments and global partition state stamp.
  * <p>
- * {@link #getAddresses(int)} returns clone of internal addresses array.
+ * {@link #getReplicas(int)} returns a clone of internal replica array.
  */
 public class PartitionTableView {
 
-    private final Address[][] addresses;
-    private final int version;
+    private final InternalPartition[] partitions;
+
+    private long stamp;
 
     @SuppressFBWarnings("EI_EXPOSE_REP")
-    public PartitionTableView(Address[][] addresses, int version) {
-        this.addresses = addresses;
-        this.version = version;
+    public PartitionTableView(InternalPartition[] partitions) {
+        this.partitions = partitions;
     }
 
-    public PartitionTableView(InternalPartition[] partitions, int version) {
-        Address[][] a = new Address[partitions.length][MAX_REPLICA_COUNT];
-        for (InternalPartition partition : partitions) {
-            int partitionId = partition.getPartitionId();
-            for (int replica = 0; replica < MAX_REPLICA_COUNT; replica++) {
-                a[partitionId][replica] = partition.getReplicaAddress(replica);
-            }
+    public long stamp() {
+        long s = stamp;
+        if (s == 0) {
+            s = calculateStamp(partitions);
+            stamp = s;
         }
-
-        this.addresses = a;
-        this.version = version;
+        return s;
     }
 
-    public int getVersion() {
-        return version;
+    public int length() {
+        return partitions.length;
     }
 
-    public Address getAddress(int partitionId, int replicaIndex) {
-        return addresses[partitionId][replicaIndex];
+    public InternalPartition getPartition(int partitionId) {
+        return partitions[partitionId];
     }
 
-    public int getLength() {
-        return addresses.length;
+    public PartitionReplica getReplica(int partitionId, int replicaIndex) {
+        InternalPartition partition = partitions[partitionId];
+        return partition != null ? partition.getReplica(replicaIndex) : null;
     }
 
-    public Address[] getAddresses(int partitionId) {
-        Address[] a = addresses[partitionId];
-        return Arrays.copyOf(a, a.length);
+    public PartitionReplica[] getReplicas(int partitionId) {
+        InternalPartition partition = partitions[partitionId];
+        return partition != null ? partition.getReplicasCopy() : new PartitionReplica[InternalPartition.MAX_REPLICA_COUNT];
     }
 
     @Override
@@ -83,53 +76,18 @@ public class PartitionTableView {
         }
 
         PartitionTableView that = (PartitionTableView) o;
-        return version == that.version && Arrays.deepEquals(addresses, that.addresses);
+
+        return Arrays.equals(partitions, that.partitions);
     }
 
     @Override
     public int hashCode() {
-        int result = Arrays.deepHashCode(addresses);
-        result = 31 * result + version;
-        return result;
+        return Arrays.hashCode(partitions);
     }
 
     @Override
     public String toString() {
-        return "PartitionTable{" + "addresses=" + Arrays.deepToString(addresses) + ", version=" + version + '}';
-    }
-
-    public static void writeData(PartitionTableView table, ObjectDataOutput out) throws IOException {
-        Address[][] addresses = table.addresses;
-        out.writeInt(addresses.length);
-        for (Address[] a : addresses) {
-            for (int j = 0; j < MAX_REPLICA_COUNT; j++) {
-                Address address = a[j];
-                boolean addressExists = address != null;
-                out.writeBoolean(addressExists);
-                if (addressExists) {
-                    address.writeData(out);
-                }
-            }
-        }
-
-        out.writeInt(table.version);
-    }
-
-    public static PartitionTableView readData(ObjectDataInput in) throws IOException {
-        int len = in.readInt();
-        Address[][] addresses = new Address[len][MAX_REPLICA_COUNT];
-        for (int i = 0; i < len; i++) {
-            for (int j = 0; j < MAX_REPLICA_COUNT; j++) {
-                boolean exists = in.readBoolean();
-                if (exists) {
-                    Address address = new Address();
-                    addresses[i][j] = address;
-                    address.readData(in);
-                }
-            }
-        }
-
-        int version = in.readInt();
-        return new PartitionTableView(addresses, version);
+        return "PartitionTableView{" + "partitions=" + Arrays.toString(partitions)
+                + ", stamp=" + stamp() + '}';
     }
 }

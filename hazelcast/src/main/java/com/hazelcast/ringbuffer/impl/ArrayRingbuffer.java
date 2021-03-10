@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,12 +23,12 @@ import java.util.Arrays;
 import java.util.Iterator;
 
 /**
- * The ArrayRingbuffer is responsible for storing the actual content of a
+ * The ArrayRingbuffer is responsible for storing the actual contents of a
  * ringbuffer.
  * <p>
  * Currently the Ringbuffer is not a partitioned data-structure. So all
  * data of a ringbuffer is stored in a single partition and replicated to
- * the replica's. No thread-safety is needed since a partition can only be
+ * the replicas. No thread safety is needed since a partition can only be
  * accessed by a single thread at any given moment.
  *
  * @param <E> the type of the data stored in the ringbuffer

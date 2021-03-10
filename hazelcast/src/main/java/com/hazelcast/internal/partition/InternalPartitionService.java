@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,29 +18,18 @@ package com.hazelcast.internal.partition;
 
 import com.hazelcast.cluster.ClusterState;
 import com.hazelcast.core.HazelcastException;
-import com.hazelcast.instance.MemberImpl;
+import com.hazelcast.cluster.Member;
 import com.hazelcast.internal.partition.impl.InternalPartitionServiceImpl;
+import com.hazelcast.internal.partition.impl.PartitionReplicaStateChecker;
 import com.hazelcast.internal.partition.impl.PartitionStateManager;
 import com.hazelcast.internal.partition.operation.FetchPartitionStateOperation;
-import com.hazelcast.nio.Address;
-import com.hazelcast.spi.partition.IPartitionService;
+import com.hazelcast.cluster.Address;
+import com.hazelcast.internal.services.GracefulShutdownAwareService;
+import com.hazelcast.internal.services.ManagedService;
 
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
-public interface InternalPartitionService extends IPartitionService {
-
-    /**
-     * Retry count for migration operations.
-     * <p>
-     * Current Invocation mechanism retries first 5 invocations without pausing.
-     */
-    int MIGRATION_RETRY_COUNT = 12;
-
-    /**
-     * Retry pause for migration operations in milliseconds.
-     */
-    long MIGRATION_RETRY_PAUSE = 10000;
+public interface InternalPartitionService extends IPartitionService, ManagedService, GracefulShutdownAwareService {
 
     /**
      * Static constant for dispatching and listening migration events
@@ -52,10 +41,19 @@ public interface InternalPartitionService extends IPartitionService {
      */
     String PARTITION_LOST_EVENT_TOPIC = ".partitionLost";
 
+    @Override
     InternalPartition getPartition(int partitionId);
 
+    @Override
     InternalPartition getPartition(int partitionId, boolean triggerOwnerAssignment);
 
+    /**
+     * Number of the member groups to be used in partition assignments.
+     *
+     * @see com.hazelcast.internal.partition.membergroup.MemberGroupFactory
+     * @see com.hazelcast.config.PartitionGroupConfig
+     * @return number of member groups
+     */
     int getMemberGroupsSize();
 
     /**
@@ -68,13 +66,18 @@ public interface InternalPartitionService extends IPartitionService {
      */
     void resumeMigration();
 
-    boolean isMemberAllowedToJoin(Address address);
+    /**
+     * Called when a member is added to the cluster. Triggers partition rebalancing.
+     * @param member new member
+     */
+    void memberAdded(Member member);
 
-    void memberAdded(MemberImpl newMember);
-
-    void memberRemoved(MemberImpl deadMember);
-
-    boolean prepareToSafeShutdown(long timeout, TimeUnit seconds);
+    /**
+     * Called when a member is removed from the cluster.
+     * Executes maintenance tasks, removes the member from partition table and triggers promotions.
+     * @param member removed member
+     */
+    void memberRemoved(Member member);
 
     InternalPartition[] getInternalPartitions();
 
@@ -89,9 +92,8 @@ public interface InternalPartitionService extends IPartitionService {
      * </ul>
      * If this instance is not the master, it will trigger the master to assign the partitions.
      *
-     * @throws HazelcastException if the partition state generator failed to arrange the partitions
      * @return {@link PartitionRuntimeState} if this node is the master and the partition table is initialized
-     *
+     * @throws HazelcastException if the partition state generator failed to arrange the partitions
      * @see PartitionStateManager#initializePartitionAssignments(java.util.Set)
      */
     PartitionRuntimeState firstArrangement();
@@ -109,6 +111,10 @@ public interface InternalPartitionService extends IPartitionService {
 
     PartitionReplicaVersionManager getPartitionReplicaVersionManager();
 
+    /**
+     * Creates an immutable/readonly view of partition table.
+     * @return immutable view of partition table
+     */
     PartitionTableView createPartitionTableView();
 
     /**
@@ -118,4 +124,13 @@ public interface InternalPartitionService extends IPartitionService {
      * @return partition ID list assigned to given target if partitions are assigned already
      */
     List<Integer> getMemberPartitionsIfAssigned(Address target);
+
+    /**
+     * Returns the {@link PartitionServiceProxy} of the partition service..
+     *
+     * @return the {@link PartitionServiceProxy}
+     */
+    PartitionServiceProxy getPartitionServiceProxy();
+
+    PartitionReplicaStateChecker getPartitionReplicaStateChecker();
 }

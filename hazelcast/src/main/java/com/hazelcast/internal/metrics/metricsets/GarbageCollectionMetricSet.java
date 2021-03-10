@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,19 +16,25 @@
 
 package com.hazelcast.internal.metrics.metricsets;
 
-
+import com.hazelcast.internal.memory.GCStatsSupport;
 import com.hazelcast.internal.metrics.MetricsRegistry;
 import com.hazelcast.internal.metrics.Probe;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
-import java.util.Collections;
-import java.util.Set;
 
+import static com.hazelcast.internal.metrics.MetricDescriptorConstants.GC_METRIC_MAJOR_COUNT;
+import static com.hazelcast.internal.metrics.MetricDescriptorConstants.GC_METRIC_MAJOR_TIME;
+import static com.hazelcast.internal.metrics.MetricDescriptorConstants.GC_METRIC_MINOR_COUNT;
+import static com.hazelcast.internal.metrics.MetricDescriptorConstants.GC_METRIC_MINOR_TIME;
+import static com.hazelcast.internal.metrics.MetricDescriptorConstants.GC_METRIC_UNKNOWN_COUNT;
+import static com.hazelcast.internal.metrics.MetricDescriptorConstants.GC_METRIC_UNKNOWN_TIME;
+import static com.hazelcast.internal.metrics.MetricDescriptorConstants.GC_PREFIX;
+import static com.hazelcast.internal.metrics.ProbeLevel.INFO;
 import static com.hazelcast.internal.metrics.ProbeLevel.MANDATORY;
-import static com.hazelcast.util.Preconditions.checkNotNull;
-import static com.hazelcast.util.SetUtil.createHashSet;
+import static com.hazelcast.internal.metrics.ProbeUnit.MS;
+import static com.hazelcast.internal.util.Preconditions.checkNotNull;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
@@ -36,23 +42,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
  */
 public final class GarbageCollectionMetricSet {
 
-    private static final Set<String> YOUNG_GC;
-    private static final Set<String> OLD_GC;
     private static final int PUBLISH_FREQUENCY_SECONDS = 1;
-
-    static {
-        final Set<String> youngGC = createHashSet(3);
-        youngGC.add("PS Scavenge");
-        youngGC.add("ParNew");
-        youngGC.add("G1 Young Generation");
-        YOUNG_GC = Collections.unmodifiableSet(youngGC);
-
-        final Set<String> oldGC = createHashSet(3);
-        oldGC.add("PS MarkSweep");
-        oldGC.add("ConcurrentMarkSweep");
-        oldGC.add("G1 Old Generation");
-        OLD_GC = Collections.unmodifiableSet(oldGC);
-    }
 
     private GarbageCollectionMetricSet() {
     }
@@ -66,24 +56,24 @@ public final class GarbageCollectionMetricSet {
         checkNotNull(metricsRegistry, "metricsRegistry");
 
         GcStats stats = new GcStats();
-        metricsRegistry.scheduleAtFixedRate(stats, PUBLISH_FREQUENCY_SECONDS, SECONDS);
-        metricsRegistry.scanAndRegister(stats, "gc");
+        metricsRegistry.scheduleAtFixedRate(stats, PUBLISH_FREQUENCY_SECONDS, SECONDS, INFO);
+        metricsRegistry.registerStaticMetrics(stats, GC_PREFIX);
     }
 
 
     @SuppressFBWarnings(value = "URF_UNREAD_FIELD", justification = "used by instrumentation tools")
     static class GcStats implements Runnable {
-        @Probe(level = MANDATORY)
+        @Probe(name = GC_METRIC_MINOR_COUNT, level = MANDATORY)
         volatile long minorCount;
-        @Probe(level = MANDATORY)
+        @Probe(name = GC_METRIC_MINOR_TIME, unit = MS, level = MANDATORY)
         volatile long minorTime;
-        @Probe(level = MANDATORY)
+        @Probe(name = GC_METRIC_MAJOR_COUNT, level = MANDATORY)
         volatile long majorCount;
-        @Probe(level = MANDATORY)
+        @Probe(name = GC_METRIC_MAJOR_TIME, unit = MS, level = MANDATORY)
         volatile long majorTime;
-        @Probe(level = MANDATORY)
+        @Probe(name = GC_METRIC_UNKNOWN_COUNT, level = MANDATORY)
         volatile long unknownCount;
-        @Probe(level = MANDATORY)
+        @Probe(name = GC_METRIC_UNKNOWN_TIME, unit = MS, level = MANDATORY)
         volatile long unknownTime;
 
         @Override
@@ -101,10 +91,10 @@ public final class GarbageCollectionMetricSet {
                     continue;
                 }
 
-                if (YOUNG_GC.contains(gc.getName())) {
+                if (GCStatsSupport.YOUNG_GC.contains(gc.getName())) {
                     minorCount += count;
                     minorTime += gc.getCollectionTime();
-                } else if (OLD_GC.contains(gc.getName())) {
+                } else if (GCStatsSupport.OLD_GC.contains(gc.getName())) {
                     majorCount += count;
                     majorTime += gc.getCollectionTime();
                 } else {

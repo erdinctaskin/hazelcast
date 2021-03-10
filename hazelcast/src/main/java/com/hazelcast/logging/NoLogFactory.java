@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,18 +16,37 @@
 
 package com.hazelcast.logging;
 
+import com.hazelcast.logging.impl.InternalLogger;
+import com.hazelcast.logging.impl.InternalLoggerFactory;
+
+import javax.annotation.Nonnull;
 import java.util.logging.Level;
 
-public class NoLogFactory implements LoggerFactory {
+public class NoLogFactory implements LoggerFactory, InternalLoggerFactory {
 
     private final ILogger noLogger = new NoLogger();
+
+    @Override
+    public void setLevel(@Nonnull Level level) {
+        // do nothing
+    }
+
+    @Override
+    public void resetLevel() {
+        // do nothing
+    }
 
     @Override
     public ILogger getLogger(String name) {
         return noLogger;
     }
 
-    static class NoLogger implements ILogger {
+    static class NoLogger implements ILogger, InternalLogger {
+
+        @Override
+        public void setLevel(Level level) {
+            // do noting
+        }
 
         @Override
         public void finest(String message) {
@@ -68,6 +87,14 @@ public class NoLogFactory implements LoggerFactory {
         }
 
         @Override
+        public void info(String message, Throwable thrown) {
+        }
+
+        @Override
+        public void info(Throwable thrown) {
+        }
+
+        @Override
         public boolean isInfoEnabled() {
             return false;
         }
@@ -99,6 +126,11 @@ public class NoLogFactory implements LoggerFactory {
 
         @Override
         public void severe(String message, Throwable thrown) {
+        }
+
+        @Override
+        public boolean isSevereEnabled() {
+            return false;
         }
 
         @Override

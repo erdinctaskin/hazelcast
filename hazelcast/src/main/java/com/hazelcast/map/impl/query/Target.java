@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,116 +16,60 @@
 
 package com.hazelcast.map.impl.query;
 
-import com.hazelcast.map.impl.MapDataSerializerHook;
-import com.hazelcast.nio.ObjectDataInput;
-import com.hazelcast.nio.ObjectDataOutput;
-import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
+import com.hazelcast.internal.util.collection.PartitionIdSet;
 
-import java.io.IOException;
-
-import static com.hazelcast.util.Preconditions.checkNotNull;
+import static com.hazelcast.internal.util.Preconditions.checkNotNull;
+import static com.hazelcast.map.impl.query.Target.TargetMode.PARTITION_OWNER;
 
 /**
  * Target for a query.
- *
- * Possible options:
- * - all nodes
- * - local node only
- * - given partition
+ * <p>
+ * Possible options:<ul>
+ * <li>all nodes
+ * <li>local node only
+ * <li>given partition set
+ * </ul>
  */
-public class Target implements IdentifiedDataSerializable {
+public final class Target {
 
-    public static final Target ALL_NODES = Target.of().allNodes().build();
-    public static final Target LOCAL_NODE = Target.of().localNode().build();
+    public static final Target ALL_NODES = new Target(TargetMode.ALL_NODES, null);
+    public static final Target LOCAL_NODE = new Target(TargetMode.LOCAL_NODE, null);
 
-    private TargetFlag target;
-    private Integer partitionId;
+    private final TargetMode mode;
+    private final PartitionIdSet partitions;
 
-    public Target() {
-    }
-
-    private Target(TargetFlag targetFlag, Integer partitionId) {
-        this.target = checkNotNull(targetFlag);
-        this.partitionId = partitionId;
-        if (targetFlag.equals(TargetFlag.PARTITION_OWNER) && partitionId == null) {
-            throw new IllegalArgumentException("It's forbidden to use null partitionId with PARTITION_OWNER target");
+    private Target(TargetMode mode, PartitionIdSet partitions) {
+        this.mode = checkNotNull(mode);
+        this.partitions = partitions;
+        if (mode.equals(PARTITION_OWNER) ^ partitions != null) {
+            throw new IllegalArgumentException("partitions must be used only with PARTITION_OWNER mode and not otherwise");
         }
     }
 
-    public Integer getPartitionId() {
-        return partitionId;
+    public TargetMode mode() {
+        return mode;
     }
 
-    public boolean isTargetLocalNode() {
-        return target.equals(TargetFlag.LOCAL_NODE);
+    public PartitionIdSet partitions() {
+        return partitions;
     }
 
-    public boolean isTargetAllNodes() {
-        return target.equals(TargetFlag.ALL_NODES);
-    }
-
-    public boolean isTargetPartitionOwner() {
-        return target.equals(TargetFlag.PARTITION_OWNER);
-    }
-
-    enum TargetFlag {
+    public enum TargetMode {
         LOCAL_NODE,
         ALL_NODES,
         PARTITION_OWNER
     }
 
-    @Override
-    public int getFactoryId() {
-        return MapDataSerializerHook.F_ID;
+    public static Target createPartitionTarget(PartitionIdSet partitions) {
+        return new Target(TargetMode.PARTITION_OWNER, partitions);
     }
 
     @Override
-    public int getId() {
-        return MapDataSerializerHook.TARGET;
-    }
-
-    @Override
-    public void writeData(ObjectDataOutput out) throws IOException {
-        out.writeInt(partitionId);
-        out.writeUTF(target.name());
-    }
-
-    @Override
-    public void readData(ObjectDataInput in) throws IOException {
-        this.partitionId = in.readInt();
-        this.target = TargetFlag.valueOf(in.readUTF());
-    }
-
-    public static TargetBuilder of() {
-        return new TargetBuilder();
-    }
-
-    public static final class TargetBuilder {
-
-        private TargetFlag target;
-        private Integer partitionId;
-
-        private TargetBuilder() {
-        }
-
-        public TargetBuilder allNodes() {
-            this.target = TargetFlag.ALL_NODES;
-            return this;
-        }
-
-        public TargetBuilder localNode() {
-            this.target = TargetFlag.LOCAL_NODE;
-            return this;
-        }
-
-        public TargetBuilder partitionOwner(int partitionId) {
-            this.target = TargetFlag.PARTITION_OWNER;
-            this.partitionId = partitionId;
-            return this;
-        }
-
-        public Target build() {
-            return new Target(target, partitionId);
-        }
+    public String toString() {
+        return "Target{"
+                + "mode=" + mode
+                + ", partitionsSize="
+                + (partitions == null ? 0 : partitions.size())
+                + '}';
     }
 }

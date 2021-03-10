@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,16 @@
 
 package com.hazelcast.map.impl.querycache.subscriber;
 
+import com.hazelcast.cluster.Member;
+import com.hazelcast.config.IndexConfig;
+import com.hazelcast.config.QueryCacheConfig;
 import com.hazelcast.core.EntryEventType;
-import com.hazelcast.core.IMap;
-import com.hazelcast.core.Member;
+import com.hazelcast.internal.serialization.Data;
 import com.hazelcast.internal.serialization.InternalSerializationService;
+import com.hazelcast.internal.util.ContextMutexFactory;
+import com.hazelcast.internal.util.FutureUtil;
+import com.hazelcast.internal.util.MapUtil;
+import com.hazelcast.map.IMap;
 import com.hazelcast.map.impl.EntryEventFilter;
 import com.hazelcast.map.impl.query.QueryEventFilter;
 import com.hazelcast.map.impl.querycache.InvokerWrapper;
@@ -30,38 +36,37 @@ import com.hazelcast.map.impl.querycache.accumulator.Accumulator;
 import com.hazelcast.map.impl.querycache.accumulator.AccumulatorInfoSupplier;
 import com.hazelcast.map.impl.querycache.subscriber.record.QueryCacheRecord;
 import com.hazelcast.map.listener.MapListener;
-import com.hazelcast.nio.Address;
-import com.hazelcast.nio.serialization.Data;
 import com.hazelcast.query.Predicate;
-import com.hazelcast.query.TruePredicate;
-import com.hazelcast.query.impl.Indexes;
+import com.hazelcast.query.Predicates;
+import com.hazelcast.query.impl.CachedQueryEntry;
+import com.hazelcast.query.impl.Index;
 import com.hazelcast.query.impl.QueryEntry;
 import com.hazelcast.query.impl.QueryableEntry;
-import com.hazelcast.query.impl.getters.Extractors;
-import com.hazelcast.spi.EventFilter;
-import com.hazelcast.util.ContextMutexFactory;
-import com.hazelcast.util.FutureUtil;
-import com.hazelcast.util.MapUtil;
+import com.hazelcast.spi.impl.UnmodifiableLazyList;
+import com.hazelcast.spi.impl.eventservice.EventFilter;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
 
+import static com.hazelcast.internal.nio.IOUtil.closeResource;
+import static com.hazelcast.internal.util.FutureUtil.waitWithDeadline;
+import static com.hazelcast.internal.util.Preconditions.checkNoNullInside;
+import static com.hazelcast.internal.util.Preconditions.checkNotNull;
 import static com.hazelcast.map.impl.querycache.subscriber.AbstractQueryCacheEndToEndConstructor.OPERATION_WAIT_TIMEOUT_MINUTES;
-import static com.hazelcast.nio.IOUtil.closeResource;
-import static com.hazelcast.util.FutureUtil.waitWithDeadline;
-import static com.hazelcast.util.Preconditions.checkNoNullInside;
-import static com.hazelcast.util.Preconditions.checkNotNull;
-import static com.hazelcast.util.SetUtil.createHashSet;
+import static com.hazelcast.map.impl.querycache.subscriber.EventPublisherHelper.publishEntryEvent;
+import static com.hazelcast.map.impl.querycache.subscriber.QueryCacheRequest.newQueryCacheRequest;
+import static com.hazelcast.query.impl.Indexes.SKIP_PARTITIONS_COUNT_CHECK;
 import static java.lang.Boolean.TRUE;
 import static java.util.concurrent.TimeUnit.MINUTES;
+
 
 /**
  * Default implementation of {@link com.hazelcast.map.QueryCache QueryCache} interface which holds actual data.
@@ -69,62 +74,65 @@ import static java.util.concurrent.TimeUnit.MINUTES;
  * @param <K> the key type for this {@link InternalQueryCache}
  * @param <V> the value type for this {@link InternalQueryCache}
  */
-@SuppressWarnings("checkstyle:methodcount")
+@SuppressWarnings({"checkstyle:methodcount", "checkstyle:classfanoutcomplexity"})
 class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
 
-    public DefaultQueryCache(String cacheId, String cacheName, IMap delegate, QueryCacheContext context) {
-        super(cacheId, cacheName, delegate, context);
+    DefaultQueryCache(String cacheId, String cacheName, QueryCacheConfig queryCacheConfig,
+                      IMap delegate, QueryCacheContext context) {
+        super(cacheId, cacheName, queryCacheConfig, delegate, context);
     }
 
     @Override
-    public void setInternal(K key, V value, boolean callDelegate, EntryEventType eventType) {
+    public void set(K key, V value, EntryEventType eventType) {
+        setInternal(key, value, eventType, true);
+    }
+
+    @Override
+    public void prepopulate(K key, V value) {
+        setInternal(key, value, EntryEventType.ADDED, false);
+    }
+
+    /**
+     * @param doEvictionCheck when doing pre-population of query cache, set
+     *                        this to false since we quit population if we reach max capacity {@link
+     *                        #reachedMaxCapacity()}, eviction is not needed.
+     */
+    private void setInternal(K key, V value, EntryEventType eventType, boolean doEvictionCheck) {
         Data keyData = toData(key);
         Data valueData = toData(value);
 
-        if (callDelegate) {
-            getDelegate().set(keyData, valueData);
-        }
-        QueryCacheRecord oldRecord = recordStore.add(keyData, valueData);
+        QueryCacheRecord oldRecord = doEvictionCheck
+                ? recordStore.add(keyData, valueData) : recordStore.addWithoutEvictionCheck(keyData, valueData);
 
         if (eventType != null) {
-            EventPublisherHelper.publishEntryEvent(context, mapName, cacheId, keyData, valueData, oldRecord, eventType);
+            publishEntryEvent(context, mapName, cacheId,
+                    keyData, valueData, oldRecord, eventType, extractors);
         }
     }
 
     @Override
-    public void deleteInternal(Object key, boolean callDelegate, EntryEventType eventType) {
+    public void delete(Object key, EntryEventType eventType) {
         checkNotNull(key, "key cannot be null");
 
         Data keyData = toData(key);
 
-        if (callDelegate) {
-            getDelegate().delete(keyData);
-        }
         QueryCacheRecord oldRecord = recordStore.remove(keyData);
         if (oldRecord == null) {
             return;
         }
         if (eventType != null) {
-            EventPublisherHelper.publishEntryEvent(context, mapName, cacheId, keyData, null, oldRecord, eventType);
+            publishEntryEvent(context, mapName, cacheId, keyData,
+                    null, oldRecord, eventType, extractors);
         }
     }
 
     @Override
     public boolean tryRecover() {
-        SubscriberContext subscriberContext = context.getSubscriberContext();
-        MapSubscriberRegistry mapSubscriberRegistry = subscriberContext.getMapSubscriberRegistry();
-
-        SubscriberRegistry subscriberRegistry = mapSubscriberRegistry.getOrNull(mapName);
-        if (subscriberRegistry == null) {
-            return true;
+        SubscriberAccumulator subscriberAccumulator = getOrNullSubscriberAccumulator();
+        if (subscriberAccumulator == null) {
+            return false;
         }
 
-        Accumulator accumulator = subscriberRegistry.getOrNull(cacheId);
-        if (accumulator == null) {
-            return true;
-        }
-
-        SubscriberAccumulator subscriberAccumulator = (SubscriberAccumulator) accumulator;
         ConcurrentMap<Integer, Long> brokenSequences = subscriberAccumulator.getBrokenSequences();
         if (brokenSequences.isEmpty()) {
             return true;
@@ -143,7 +151,7 @@ class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
         SubscriberContext subscriberContext = context.getSubscriberContext();
         SubscriberContextSupport subscriberContextSupport = subscriberContext.getSubscriberContextSupport();
 
-        List<Future<Object>> futures = new ArrayList<Future<Object>>(numberOfBrokenSequences);
+        List<Future<Object>> futures = new ArrayList<>(numberOfBrokenSequences);
         for (Map.Entry<Integer, Long> entry : brokenSequences.entrySet()) {
             Integer partitionId = entry.getKey();
             Long sequence = entry.getValue();
@@ -192,12 +200,11 @@ class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
             subscriberContext.getEventService().removePublisherListener(mapName, cacheId, publisherListenerId);
 
             Collection<Member> memberList = context.getMemberList();
-            List<Future> futures = new ArrayList<Future>(memberList.size());
+            List<Future> futures = new ArrayList<>(memberList.size());
 
             for (Member member : memberList) {
-                Address address = member.getAddress();
                 Object removePublisher = subscriberContextSupport.createDestroyQueryCacheOperation(mapName, cacheId);
-                Future future = invokerWrapper.invokeOnTarget(removePublisher, address);
+                Future future = invokerWrapper.invokeOnTarget(removePublisher, member);
                 futures.add(future);
             }
             waitWithDeadline(futures, OPERATION_WAIT_TIMEOUT_MINUTES, MINUTES);
@@ -206,7 +213,7 @@ class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
                 subscriberContext.getEventService().removePublisherListener(mapName, cacheId, publisherListenerId);
             } finally {
                 Object removePublisher = subscriberContextSupport.createDestroyQueryCacheOperation(mapName, cacheId);
-                invokerWrapper.invoke(removePublisher);
+                invokerWrapper.invoke(removePublisher, false);
             }
         }
     }
@@ -309,34 +316,32 @@ class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
 
     @Override
     public Set<K> keySet() {
-        return keySet(TruePredicate.INSTANCE);
+        return keySet(Predicates.alwaysTrue());
     }
 
     @Override
     public Collection<V> values() {
-        return values(TruePredicate.INSTANCE);
+        return values(Predicates.alwaysTrue());
     }
 
     @Override
     public Set<Map.Entry<K, V>> entrySet() {
-        return entrySet(TruePredicate.INSTANCE);
+        return entrySet(Predicates.alwaysTrue());
     }
 
     @Override
     public Set<K> keySet(Predicate predicate) {
         checkNotNull(predicate, "Predicate cannot be null!");
 
-        final Set<K> resultingSet;
+        Set<K> resultingSet = new HashSet<>();
 
-        Set<QueryableEntry> query = indexes.query(predicate);
+        Iterable<QueryableEntry> query = indexes.query(predicate, SKIP_PARTITIONS_COUNT_CHECK);
         if (query != null) {
-            resultingSet = createHashSet(query.size());
             for (QueryableEntry entry : query) {
-                K key = (K) entry.getKey();
+                K key = toObject(entry.getKeyData());
                 resultingSet.add(key);
             }
         } else {
-            resultingSet = new HashSet<K>();
             doFullKeyScan(predicate, resultingSet);
         }
 
@@ -347,19 +352,16 @@ class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
     public Set<Map.Entry<K, V>> entrySet(Predicate predicate) {
         checkNotNull(predicate, "Predicate cannot be null!");
 
-        Set<Map.Entry<K, V>> resultingSet;
+        Set<Map.Entry<K, V>> resultingSet = new HashSet<>();
 
-        Set<QueryableEntry> query = indexes.query(predicate);
+        Iterable<QueryableEntry> query = indexes.query(predicate, SKIP_PARTITIONS_COUNT_CHECK);
         if (query != null) {
-            if (query.isEmpty()) {
-                return Collections.emptySet();
-            }
-            resultingSet = createHashSet(query.size());
             for (QueryableEntry entry : query) {
-                resultingSet.add(entry);
+                Map.Entry<K, V> copyEntry = new CachedQueryEntry<>(serializationService, entry.getKeyData(),
+                        entry.getValueData(), null);
+                resultingSet.add(copyEntry);
             }
         } else {
-            resultingSet = new HashSet<Map.Entry<K, V>>();
             doFullEntryScan(predicate, resultingSet);
         }
         return resultingSet;
@@ -373,19 +375,17 @@ class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
             return Collections.emptySet();
         }
 
-        final Set<V> resultingSet;
+        List<Data> resultingList = new ArrayList<>();
 
-        Set<QueryableEntry> query = indexes.query(predicate);
+        Iterable<QueryableEntry> query = indexes.query(predicate, SKIP_PARTITIONS_COUNT_CHECK);
         if (query != null) {
-            resultingSet = createHashSet(query.size());
             for (QueryableEntry entry : query) {
-                resultingSet.add((V) entry.getValue());
+                resultingList.add(entry.getValueData());
             }
         } else {
-            resultingSet = new HashSet<V>();
-            doFullValueScan(predicate, resultingSet);
+            doFullValueScan(predicate, resultingList);
         }
-        return resultingSet;
+        return new UnmodifiableLazyList(resultingList, serializationService);
     }
 
     @Override
@@ -399,54 +399,54 @@ class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
     }
 
     @Override
-    public String addEntryListener(MapListener listener, boolean includeValue) {
+    public UUID addEntryListener(MapListener listener, boolean includeValue) {
         checkNotNull(listener, "listener cannot be null");
 
         return addEntryListenerInternal(listener, null, includeValue);
     }
 
     @Override
-    public String addEntryListener(MapListener listener, K key, boolean includeValue) {
+    public UUID addEntryListener(MapListener listener, K key, boolean includeValue) {
         checkNotNull(listener, "listener cannot be null");
 
         return addEntryListenerInternal(listener, key, includeValue);
     }
 
-    private String addEntryListenerInternal(MapListener listener, K key, boolean includeValue) {
+    private UUID addEntryListenerInternal(MapListener listener, K key, boolean includeValue) {
         checkNotNull(listener, "listener cannot be null");
 
         Data keyData = toData(key);
-        EventFilter filter = new EntryEventFilter(includeValue, keyData);
+        EventFilter filter = new EntryEventFilter(keyData, includeValue);
         QueryCacheEventService eventService = getEventService();
         String mapName = delegate.getName();
         return eventService.addListener(mapName, cacheId, listener, filter);
     }
 
     @Override
-    public String addEntryListener(MapListener listener, Predicate<K, V> predicate, boolean includeValue) {
+    public UUID addEntryListener(MapListener listener, Predicate<K, V> predicate, boolean includeValue) {
         checkNotNull(listener, "listener cannot be null");
         checkNotNull(predicate, "predicate cannot be null");
 
         QueryCacheEventService eventService = getEventService();
-        EventFilter filter = new QueryEventFilter(includeValue, null, predicate);
+        EventFilter filter = new QueryEventFilter(null, predicate, includeValue);
         String mapName = delegate.getName();
         return eventService.addListener(mapName, cacheId, listener, filter);
     }
 
     @Override
-    public String addEntryListener(MapListener listener, Predicate<K, V> predicate, K key, boolean includeValue) {
+    public UUID addEntryListener(MapListener listener, Predicate<K, V> predicate, K key, boolean includeValue) {
         checkNotNull(listener, "listener cannot be null");
         checkNotNull(predicate, "predicate cannot be null");
         checkNotNull(key, "key cannot be null");
 
         QueryCacheEventService eventService = getEventService();
-        EventFilter filter = new QueryEventFilter(includeValue, toData(key), predicate);
+        EventFilter filter = new QueryEventFilter(toData(key), predicate, includeValue);
         String mapName = delegate.getName();
         return eventService.addListener(mapName, cacheId, listener, filter);
     }
 
     @Override
-    public boolean removeEntryListener(String id) {
+    public boolean removeEntryListener(UUID id) {
         checkNotNull(id, "listener ID cannot be null");
 
         QueryCacheEventService eventService = getEventService();
@@ -454,10 +454,14 @@ class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
     }
 
     @Override
-    public void addIndex(String attribute, boolean ordered) {
-        checkNotNull(attribute, "attribute cannot be null");
+    public void addIndex(IndexConfig config) {
+        checkNotNull(config, "Index config cannot be null.");
 
-        getIndexes().addOrGetIndex(attribute, ordered);
+        assert indexes.isGlobal();
+
+        IndexConfig config0 = getNormalizedIndexConfig(config);
+
+        indexes.addOrGetIndex(config0);
 
         InternalSerializationService serializationService = context.getSerializationService();
 
@@ -466,8 +470,8 @@ class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
             Data keyData = entry.getKey();
             QueryCacheRecord record = entry.getValue();
             Object value = record.getValue();
-            QueryEntry queryable = new QueryEntry(serializationService, keyData, value, Extractors.empty());
-            indexes.saveEntryIndex(queryable, null);
+            QueryEntry queryable = new QueryEntry(serializationService, keyData, value, extractors);
+            indexes.putEntry(queryable, null, Index.OperationSource.USER);
         }
     }
 
@@ -482,8 +486,54 @@ class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
     }
 
     @Override
-    public Indexes getIndexes() {
-        return indexes;
+    public void recreate() {
+        ContextMutexFactory.Mutex mutex = context.getLifecycleMutexFactory().mutexFor(mapName);
+        try {
+            // done other mutex to prevent races with `destroy`
+            synchronized (mutex) {
+                SubscriberContext subscriberContext = context.getSubscriberContext();
+
+                // 0. Check subscriber still exists
+                SubscriberAccumulator subscriberAccumulator = getOrNullSubscriberAccumulator();
+                if (subscriberAccumulator == null) {
+                    return;
+                }
+
+                // 1. Reset client-side subscriber resources
+                subscriberAccumulator.reset();
+
+                // 2. Reset/recreate server-side publisher resources
+                QueryCacheRequest request = newQueryCacheRequest()
+                        .withCacheName(cacheName)
+                        .forMap(delegate)
+                        .urgent(true)
+                        .withContext(context);
+
+                QueryCacheEndToEndProvider queryCacheEndToEndProvider
+                        = subscriberContext.getEndToEndQueryCacheProvider();
+                queryCacheEndToEndProvider.tryCreateQueryCache(mapName, cacheName,
+                        subscriberContext.newEndToEndConstructor(request));
+            }
+        } finally {
+            closeResource(mutex);
+        }
+    }
+
+    private SubscriberAccumulator getOrNullSubscriberAccumulator() {
+        SubscriberContext subscriberContext = context.getSubscriberContext();
+        MapSubscriberRegistry mapSubscriberRegistry = subscriberContext.getMapSubscriberRegistry();
+
+        SubscriberRegistry subscriberRegistry = mapSubscriberRegistry.getOrNull(mapName);
+        if (subscriberRegistry == null) {
+            return null;
+        }
+
+        Accumulator accumulator = subscriberRegistry.getOrNull(cacheId);
+        if (accumulator == null) {
+            return null;
+        }
+
+        return (SubscriberAccumulator) accumulator;
     }
 
     @Override
@@ -491,9 +541,7 @@ class DefaultQueryCache<K, V> extends AbstractInternalQueryCache<K, V> {
         int removedEntryCount = 0;
 
         Set<Data> keys = recordStore.keySet();
-        Iterator<Data> iterator = keys.iterator();
-        while (iterator.hasNext()) {
-            Data keyData = iterator.next();
+        for (Data keyData : keys) {
             if (context.getPartitionId(keyData) == partitionId) {
                 if (recordStore.remove(keyData) != null) {
                     removedEntryCount++;

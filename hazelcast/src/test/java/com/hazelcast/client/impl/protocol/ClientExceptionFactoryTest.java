@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,12 +18,9 @@ package com.hazelcast.client.impl.protocol;
 
 import com.hazelcast.cache.CacheNotExistsException;
 import com.hazelcast.client.AuthenticationException;
-import com.hazelcast.client.UndefinedErrorCodeException;
 import com.hazelcast.client.impl.protocol.exception.MaxMessageSizeExceeded;
-import com.hazelcast.config.ConfigurationException;
 import com.hazelcast.config.InvalidConfigurationException;
 import com.hazelcast.core.ConsistencyLostException;
-import com.hazelcast.core.DuplicateInstanceNameException;
 import com.hazelcast.core.HazelcastException;
 import com.hazelcast.core.HazelcastInstanceNotActiveException;
 import com.hazelcast.core.HazelcastOverloadException;
@@ -35,15 +32,13 @@ import com.hazelcast.crdt.MutationDisallowedException;
 import com.hazelcast.crdt.TargetNotReplicaException;
 import com.hazelcast.durableexecutor.StaleTaskIdException;
 import com.hazelcast.internal.cluster.impl.ConfigMismatchException;
+import com.hazelcast.internal.util.AddressUtil;
 import com.hazelcast.map.QueryResultSizeExceededException;
 import com.hazelcast.map.ReachedMaxSizeException;
-import com.hazelcast.mapreduce.RemoteMapReduceException;
-import com.hazelcast.mapreduce.TopologyChangedException;
 import com.hazelcast.memory.NativeOutOfMemoryError;
 import com.hazelcast.nio.serialization.HazelcastSerializationException;
 import com.hazelcast.partition.NoDataMemberInClusterException;
 import com.hazelcast.query.QueryException;
-import com.hazelcast.quorum.QuorumException;
 import com.hazelcast.replicatedmap.ReplicatedMapCantBeCreatedOnLiteMemberException;
 import com.hazelcast.ringbuffer.StaleSequenceException;
 import com.hazelcast.spi.exception.CallerNotMemberException;
@@ -55,16 +50,16 @@ import com.hazelcast.spi.exception.RetryableIOException;
 import com.hazelcast.spi.exception.TargetDisconnectedException;
 import com.hazelcast.spi.exception.TargetNotMemberException;
 import com.hazelcast.spi.exception.WrongTargetException;
-import com.hazelcast.test.HazelcastParametersRunnerFactory;
+import com.hazelcast.splitbrainprotection.SplitBrainProtectionException;
+import com.hazelcast.test.HazelcastParallelParametersRunnerFactory;
 import com.hazelcast.test.HazelcastTestSupport;
-import com.hazelcast.test.annotation.ParallelTest;
+import com.hazelcast.test.annotation.ParallelJVMTest;
 import com.hazelcast.test.annotation.QuickTest;
 import com.hazelcast.topic.TopicOverloadException;
 import com.hazelcast.transaction.TransactionException;
 import com.hazelcast.transaction.TransactionNotActiveException;
 import com.hazelcast.transaction.TransactionTimedOutException;
-import com.hazelcast.util.AddressUtil;
-import com.hazelcast.wan.WANReplicationQueueFullException;
+import com.hazelcast.wan.WanQueueFullException;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
@@ -72,6 +67,7 @@ import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameter;
 import org.junit.runners.Parameterized.Parameters;
 import org.junit.runners.Parameterized.UseParametersRunnerFactory;
+import testsubjects.CustomExceptions;
 
 import javax.cache.CacheException;
 import javax.cache.integration.CacheLoaderException;
@@ -88,7 +84,6 @@ import java.io.UTFDataFormatException;
 import java.net.SocketException;
 import java.net.URISyntaxException;
 import java.security.AccessControlException;
-import java.util.Collections;
 import java.util.ConcurrentModificationException;
 import java.util.NoSuchElementException;
 import java.util.concurrent.CancellationException;
@@ -100,20 +95,20 @@ import static java.util.Arrays.asList;
 import static junit.framework.TestCase.assertEquals;
 
 @RunWith(Parameterized.class)
-@UseParametersRunnerFactory(HazelcastParametersRunnerFactory.class)
-@Category({QuickTest.class, ParallelTest.class})
+@UseParametersRunnerFactory(HazelcastParallelParametersRunnerFactory.class)
+@Category({QuickTest.class, ParallelJVMTest.class})
 public class ClientExceptionFactoryTest extends HazelcastTestSupport {
 
     @Parameter
     public Throwable throwable;
 
-    private ClientExceptionFactory exceptionFactory = new ClientExceptionFactory(true);
+    private ClientExceptionFactory exceptionFactory = new ClientExceptionFactory(true,
+            Thread.currentThread().getContextClassLoader());
 
     @Test
     public void testException() {
         ClientMessage exceptionMessage = exceptionFactory.createExceptionMessage(throwable);
-        ClientMessage responseMessage = ClientMessage.createForDecode(exceptionMessage.buffer(), 0);
-        Throwable resurrectedThrowable = exceptionFactory.createException(responseMessage);
+        Throwable resurrectedThrowable = exceptionFactory.createException(exceptionMessage);
 
         if (!exceptionEquals(throwable, resurrectedThrowable)) {
             assertEquals(throwable, resurrectedThrowable);
@@ -129,21 +124,10 @@ public class ClientExceptionFactoryTest extends HazelcastTestSupport {
             return false;
         }
 
-        if (exceptionFactory.isKnownClass(expected.getClass())) {
-            if (!expected.getClass().equals(actual.getClass())) {
-                return false;
-            }
-
-            // We compare the message only for known exceptions.
-            // We also ignore it for URISyntaxException, as it is not possible to restore it without special, probably JVM-version specific logic.
-            if (expected.getClass() != URISyntaxException.class && !equals(expected.getMessage(), actual.getMessage())) {
-                return false;
-            }
-        } else {
-            if (!UndefinedErrorCodeException.class.equals(actual.getClass())
-                    || !expected.getClass().getName().equals(((UndefinedErrorCodeException) actual).getOriginClassName())) {
-                return false;
-            }
+        // We compare the message only for known exceptions.
+        // We also ignore it for URISyntaxException, as it is not possible to restore it without special, probably JVM-version specific logic.
+        if (expected.getClass() != URISyntaxException.class && !equals(expected.getMessage(), actual.getMessage())) {
+            return false;
         }
 
         if (!stackTraceArrayEquals(expected.getStackTrace(), actual.getStackTrace())) {
@@ -193,9 +177,7 @@ public class ClientExceptionFactoryTest extends HazelcastTestSupport {
                 new Object[]{new ClassNotFoundException(randomString())},
                 new Object[]{new ConcurrentModificationException(randomString())},
                 new Object[]{new ConfigMismatchException(randomString())},
-                new Object[]{new ConfigurationException(randomString())},
                 new Object[]{new DistributedObjectDestroyedException(randomString())},
-                new Object[]{new DuplicateInstanceNameException(randomString())},
                 new Object[]{new EOFException(randomString())},
                 new Object[]{new ExecutionException(new IOException())},
                 new Object[]{new HazelcastException(randomString())},
@@ -222,10 +204,9 @@ public class ClientExceptionFactoryTest extends HazelcastTestSupport {
                 new Object[]{new PartitionMigratingException(randomString())},
                 new Object[]{new QueryException(randomString())},
                 new Object[]{new QueryResultSizeExceededException(randomString())},
-                new Object[]{new QuorumException(randomString())},
+                new Object[]{new SplitBrainProtectionException(randomString())},
                 new Object[]{new ReachedMaxSizeException(randomString())},
                 new Object[]{new RejectedExecutionException(randomString())},
-                new Object[]{new RemoteMapReduceException(randomMapName(), Collections.<Exception>emptyList())},
                 new Object[]{new ResponseAlreadySentException(randomString())},
                 new Object[]{new RetryableHazelcastException(randomString())},
                 new Object[]{new RetryableIOException(randomString())},
@@ -238,7 +219,6 @@ public class ClientExceptionFactoryTest extends HazelcastTestSupport {
                 new Object[]{new TargetNotMemberException(randomString())},
                 new Object[]{new TimeoutException(randomString())},
                 new Object[]{new TopicOverloadException(randomString())},
-                new Object[]{new TopologyChangedException(randomString())},
                 new Object[]{new TransactionException(randomString())},
                 new Object[]{new TransactionNotActiveException(randomString())},
                 new Object[]{new TransactionTimedOutException(randomString())},
@@ -255,8 +235,8 @@ public class ClientExceptionFactoryTest extends HazelcastTestSupport {
                 },
                 new Object[]{new NoDataMemberInClusterException(randomString())},
                 new Object[]{new ReplicatedMapCantBeCreatedOnLiteMemberException(randomString())},
-                new Object[]{new MaxMessageSizeExceeded()},
-                new Object[]{new WANReplicationQueueFullException(randomString())},
+                new Object[]{new MaxMessageSizeExceeded(randomString())},
+                new Object[]{new WanQueueFullException(randomString())},
                 new Object[]{new AssertionError(randomString())},
                 new Object[]{new OutOfMemoryError(randomString())},
                 new Object[]{new StackOverflowError(randomString())},
@@ -269,8 +249,6 @@ public class ClientExceptionFactoryTest extends HazelcastTestSupport {
                 new Object[]{new RuntimeException(new RuntimeException("blabla"))},
                 // exception with message and cause without message
                 new Object[]{new RuntimeException("blabla", new NullPointerException())},
-                // custom exception in causes
-                new Object[]{new RuntimeException("blabla", new DummyUncheckedHazelcastTestException())},
                 new Object[]{new RuntimeException("fun", new RuntimeException("codec \n is \n not \n pwned"))},
                 new Object[]{
                         new RuntimeException("fun",
@@ -280,7 +258,13 @@ public class ClientExceptionFactoryTest extends HazelcastTestSupport {
                 new Object[]{new IndeterminateOperationStateException(randomString())},
                 new Object[]{new TargetNotReplicaException(randomString())},
                 new Object[]{new MutationDisallowedException(randomString())},
-                new Object[]{new ConsistencyLostException(randomString())}
+                new Object[]{new ConsistencyLostException(randomString())},
+                new Object[]{new CustomExceptions.CustomException()},
+                new Object[]{new CustomExceptions.CustomExceptionWithMessage(randomString())},
+                new Object[]{new CustomExceptions.CustomExceptionWithMessageAndCause(randomString(),
+                        new CustomExceptions.CustomExceptionWithMessage(randomString()))},
+                new Object[]{new CustomExceptions.CustomExceptionWithCause(new RuntimeException())},
+                new Object[]{new RuntimeException("blabla", new CustomExceptions.CustomExceptionWithMessage(randomString()))}
         );
     }
 }

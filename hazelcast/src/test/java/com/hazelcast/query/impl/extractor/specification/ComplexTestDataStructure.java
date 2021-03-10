@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,6 +36,9 @@ import static com.hazelcast.query.impl.extractor.AbstractExtractionSpecification
  * limbs_list & limbs_array, so that both extraction in arrays and in collections may be tested.
  */
 public class ComplexTestDataStructure {
+
+    private ComplexTestDataStructure() {
+    }
 
     public static class Person implements Serializable, PortableAware {
         String name;
@@ -109,7 +112,7 @@ public class ComplexTestDataStructure {
 
         @Override
         public void writePortable(PortableWriter writer) throws IOException {
-            writer.writeUTF("name", name);
+            writer.writeString("name", name);
             writer.writePortableArray("limbs_portable", limbs_portable);
             writer.writePortable("firstLimb", firstLimb);
             writer.writePortable("secondLimb", secondLimb);
@@ -117,7 +120,7 @@ public class ComplexTestDataStructure {
 
         @Override
         public void readPortable(PortableReader reader) throws IOException {
-            name = reader.readUTF("name");
+            name = reader.readString("name");
             limbs_portable = reader.readPortableArray("limbs_portable");
             firstLimb = reader.readPortable("firstLimb");
             secondLimb = reader.readPortable("secondLimb");
@@ -196,16 +199,16 @@ public class ComplexTestDataStructure {
 
         @Override
         public void writePortable(PortableWriter writer) throws IOException {
-            writer.writeUTF("name", name);
+            writer.writeString("name", name);
             writer.writePortableArray("fingers_portable", fingers_portable);
-            writer.writeUTFArray("tattoos_portable", tattoos_portable);
+            writer.writeStringArray("tattoos_portable", tattoos_portable);
         }
 
         @Override
         public void readPortable(PortableReader reader) throws IOException {
-            name = reader.readUTF("name");
+            name = reader.readString("name");
             fingers_portable = reader.readPortableArray("fingers_portable");
-            tattoos_portable = reader.readUTFArray("tattoos_portable");
+            tattoos_portable = reader.readStringArray("tattoos_portable");
         }
 
         @Override
@@ -285,12 +288,12 @@ public class ComplexTestDataStructure {
 
         @Override
         public void writePortable(PortableWriter writer) throws IOException {
-            writer.writeUTF("name", name);
+            writer.writeString("name", name);
         }
 
         @Override
         public void readPortable(PortableReader reader) throws IOException {
-            name = reader.readUTF("name");
+            name = reader.readString("name");
         }
     }
 

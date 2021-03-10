@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,49 +17,93 @@
 package com.hazelcast.map.impl.record;
 
 import com.hazelcast.config.CacheDeserializedValues;
+import com.hazelcast.config.EvictionPolicy;
 import com.hazelcast.config.MapConfig;
-import com.hazelcast.core.PartitioningStrategy;
-import com.hazelcast.nio.serialization.Data;
-import com.hazelcast.spi.serialization.SerializationService;
+import com.hazelcast.internal.serialization.Data;
+import com.hazelcast.internal.serialization.SerializationService;
+import com.hazelcast.map.impl.MapContainer;
+
+import static com.hazelcast.map.impl.eviction.Evictor.NULL_EVICTOR;
 
 public class DataRecordFactory implements RecordFactory<Data> {
 
-    private final SerializationService serializationService;
-    private final PartitioningStrategy partitionStrategy;
-    private final CacheDeserializedValues cacheDeserializedValues;
-    private final boolean statisticsEnabled;
+    private final MapContainer mapContainer;
+    private final SerializationService ss;
 
-    public DataRecordFactory(MapConfig config, SerializationService serializationService,
-                             PartitioningStrategy partitionStrategy) {
-        this.serializationService = serializationService;
-        this.partitionStrategy = partitionStrategy;
-        this.statisticsEnabled = config.isStatisticsEnabled();
-        this.cacheDeserializedValues = config.getCacheDeserializedValues();
+    public DataRecordFactory(MapContainer mapContainer, SerializationService ss) {
+        this.ss = ss;
+        this.mapContainer = mapContainer;
     }
 
     @Override
     public Record<Data> newRecord(Object value) {
-        assert value != null : "value can not be null";
+        MapConfig mapConfig = mapContainer.getMapConfig();
+        boolean perEntryStatsEnabled = mapConfig.isPerEntryStatsEnabled();
+        CacheDeserializedValues cacheDeserializedValues = mapConfig.getCacheDeserializedValues();
+        boolean hasEviction = mapContainer.getEvictor() != NULL_EVICTOR;
 
-        final Data data = serializationService.toData(value, partitionStrategy);
+        Data valueData = ss.toData(value);
+
         switch (cacheDeserializedValues) {
             case NEVER:
-                return statisticsEnabled ? new DataRecordWithStats(data) : new DataRecord(data);
+                return newSimpleRecord(valueData, mapConfig, perEntryStatsEnabled, hasEviction);
             default:
-                return statisticsEnabled ? new CachedDataRecordWithStats(data) : new CachedDataRecord(data);
+                return newCachedSimpleRecord(valueData, mapConfig, perEntryStatsEnabled, hasEviction);
         }
     }
 
     @Override
-    public void setValue(Record<Data> record, Object value) {
-        assert value != null : "value can not be null";
+    public MapContainer geMapContainer() {
+        return mapContainer;
+    }
 
-        final Data v;
-        if (value instanceof Data) {
-            v = (Data) value;
-        } else {
-            v = serializationService.toData(value, partitionStrategy);
+    private Record<Data> newCachedSimpleRecord(Data valueData, MapConfig mapConfig,
+                                               boolean perEntryStatsEnabled, boolean hasEviction) {
+        if (perEntryStatsEnabled || isClusterV41()) {
+            return new CachedDataRecordWithStats(valueData);
         }
-        record.setValue(v);
+
+        if (hasEviction) {
+            if (mapConfig.getEvictionConfig().getEvictionPolicy() == EvictionPolicy.LRU) {
+                return new CachedSimpleRecordWithLRUEviction(valueData);
+            }
+
+            if (mapConfig.getEvictionConfig().getEvictionPolicy() == EvictionPolicy.LFU) {
+                return new CachedSimpleRecordWithLFUEviction(valueData);
+            }
+
+            if (mapConfig.getEvictionConfig().getEvictionPolicy() == EvictionPolicy.RANDOM) {
+                return new CachedSimpleRecord(valueData);
+            }
+
+            return new CachedDataRecordWithStats(valueData);
+        }
+
+        return new CachedSimpleRecord(valueData);
+    }
+
+    private Record<Data> newSimpleRecord(Data valueData, MapConfig mapConfig,
+                                         boolean perEntryStatsEnabled, boolean hasEviction) {
+        if (perEntryStatsEnabled || isClusterV41()) {
+            return new DataRecordWithStats(valueData);
+        }
+
+        if (hasEviction) {
+            if (mapConfig.getEvictionConfig().getEvictionPolicy() == EvictionPolicy.LRU) {
+                return new SimpleRecordWithLRUEviction<>(valueData);
+            }
+
+            if (mapConfig.getEvictionConfig().getEvictionPolicy() == EvictionPolicy.LFU) {
+                return new SimpleRecordWithLFUEviction<>(valueData);
+            }
+
+            if (mapConfig.getEvictionConfig().getEvictionPolicy() == EvictionPolicy.RANDOM) {
+                return new SimpleRecord<>(valueData);
+            }
+
+            return new DataRecordWithStats(valueData);
+        }
+
+        return new SimpleRecord<>(valueData);
     }
 }

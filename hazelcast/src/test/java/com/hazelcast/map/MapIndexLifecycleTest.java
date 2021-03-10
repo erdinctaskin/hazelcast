@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,37 +16,36 @@
 
 package com.hazelcast.map;
 
+import com.hazelcast.cluster.Member;
 import com.hazelcast.config.Config;
-import com.hazelcast.config.MapIndexConfig;
+import com.hazelcast.config.ConfigAccessor;
+import com.hazelcast.config.IndexConfig;
+import com.hazelcast.config.IndexType;
 import com.hazelcast.config.ServiceConfig;
 import com.hazelcast.core.HazelcastInstance;
-import com.hazelcast.core.IMap;
-import com.hazelcast.core.Member;
-import com.hazelcast.instance.Node;
+import com.hazelcast.instance.impl.Node;
+import com.hazelcast.internal.services.CoreService;
+import com.hazelcast.internal.services.PostJoinAwareService;
+import com.hazelcast.internal.util.IterationType;
 import com.hazelcast.map.impl.MapContainer;
 import com.hazelcast.map.impl.MapService;
 import com.hazelcast.map.impl.MapServiceContext;
 import com.hazelcast.map.impl.PartitionContainer;
 import com.hazelcast.map.impl.query.Query;
-import com.hazelcast.map.impl.query.QueryPartitionOperation;
 import com.hazelcast.map.impl.query.QueryResult;
 import com.hazelcast.map.impl.recordstore.RecordStore;
 import com.hazelcast.query.Predicates;
 import com.hazelcast.query.impl.Indexes;
-import com.hazelcast.spi.CoreService;
-import com.hazelcast.spi.InternalCompletableFuture;
-import com.hazelcast.spi.Operation;
-import com.hazelcast.spi.OperationService;
-import com.hazelcast.spi.PostJoinAwareService;
+import com.hazelcast.spi.impl.InternalCompletableFuture;
 import com.hazelcast.spi.impl.NodeEngineImpl;
-import com.hazelcast.spi.properties.GroupProperty;
-import com.hazelcast.test.AssertTask;
+import com.hazelcast.spi.impl.operationservice.Operation;
+import com.hazelcast.spi.impl.operationservice.OperationService;
+import com.hazelcast.spi.properties.ClusterProperty;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import com.hazelcast.test.HazelcastTestSupport;
 import com.hazelcast.test.TestHazelcastInstanceFactory;
-import com.hazelcast.test.annotation.ParallelTest;
+import com.hazelcast.test.annotation.ParallelJVMTest;
 import com.hazelcast.test.annotation.QuickTest;
-import com.hazelcast.util.IterationType;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
@@ -55,19 +54,30 @@ import java.io.Serializable;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static com.hazelcast.config.InMemoryFormat.NATIVE;
+import static com.hazelcast.test.Accessors.getNode;
+import static com.hazelcast.test.Accessors.getNodeEngineImpl;
+import static com.hazelcast.test.Accessors.getOperationService;
 import static java.util.Arrays.copyOfRange;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 @RunWith(HazelcastParallelClassRunner.class)
-@Category({QuickTest.class, ParallelTest.class})
+@Category({QuickTest.class, ParallelJVMTest.class})
 public class MapIndexLifecycleTest extends HazelcastTestSupport {
 
     private static final int BOOK_COUNT = 1000;
 
     private String mapName = randomMapName();
+
+    @Override
+    protected Config getConfig() {
+        return smallInstanceConfig();
+    }
+
+    boolean globalIndex() {
+        return true;
+    }
 
     @Test
     public void recordStoresAndIndexes_createdDestroyedProperly() {
@@ -115,28 +125,28 @@ public class MapIndexLifecycleTest extends HazelcastTestSupport {
         }
     }
 
-    @Test(timeout = 120000)
+    @Test
     public void whenIndexAddedProgrammatically_existsOnAllMembers() {
         // GIVEN indexes are configured before Hazelcast starts
         int clusterSize = 3;
         TestHazelcastInstanceFactory instanceFactory = createHazelcastInstanceFactory(clusterSize);
         HazelcastInstance[] instances = new HazelcastInstance[clusterSize];
 
-        Config config = getConfig().setProperty(GroupProperty.PARTITION_COUNT.getName(), "4");
+        Config config = getConfig().setProperty(ClusterProperty.PARTITION_COUNT.getName(), "4");
         config.getMapConfig(mapName);
-        config.getServicesConfig()
-              .addServiceConfig(
-                      new ServiceConfig()
-                              .setName("SlowPostJoinAwareService")
-                              .setEnabled(true)
-                              .setImplementation(new SlowPostJoinAwareService())
-              );
+        ConfigAccessor.getServicesConfig(config)
+                .addServiceConfig(
+                        new ServiceConfig()
+                                .setName("SlowPostJoinAwareService")
+                                .setEnabled(true)
+                                .setImplementation(new SlowPostJoinAwareService())
+                );
 
         instances[0] = instanceFactory.newHazelcastInstance(config);
         IMap<Integer, Book> bookMap = instances[0].getMap(mapName);
         fillMap(bookMap);
-        bookMap.addIndex("author", false);
-        bookMap.addIndex("year", true);
+        bookMap.addIndex(getIndexConfig("author", false));
+        bookMap.addIndex(getIndexConfig("year", true));
         assertEquals(BOOK_COUNT, bookMap.size());
 
         // THEN indexes are migrated and populated on all members
@@ -153,48 +163,33 @@ public class MapIndexLifecycleTest extends HazelcastTestSupport {
     private void assertGlobalIndexesAreInitialized(HazelcastInstance instance) {
         MapServiceContext context = getMapServiceContext(instance);
         final MapContainer mapContainer = context.getMapContainer(mapName);
-        if (mapContainer.getMapConfig().getInMemoryFormat().equals(NATIVE)) {
+        if (!globalIndex()) {
             return;
         }
-        assertTrueEventually(new AssertTask() {
-            @Override
-            public void run() {
-                assertEquals(2, mapContainer.getIndexes().getIndexes().length);
-            }
-        });
+        assertTrueEventually(() -> assertEquals(2, mapContainer.getIndexes().getIndexes().length));
+
         assertNotNull("There should be a global index for attribute 'author'",
                 mapContainer.getIndexes().getIndex("author"));
         assertNotNull("There should be a global index for attribute 'year'",
                 mapContainer.getIndexes().getIndex("year"));
         final String authorOwned = findAuthorOwnedBy(instance);
         final Integer yearOwned = findYearOwnedBy(instance);
-        assertTrueEventually(new AssertTask() {
-            @Override
-            public void run() {
-                assertTrue("Author index should contain records.",
-                        mapContainer.getIndexes()
-                                    .getIndex("author")
-                                    .getRecords(authorOwned).size() > 0);
-            }
-        });
+        assertTrueEventually(() -> assertTrue("Author index should contain records.",
+                mapContainer.getIndexes()
+                        .getIndex("author")
+                        .getRecords(authorOwned).size() > 0));
 
-        assertTrueEventually(new AssertTask() {
-            @Override
-            public void run() {
-                assertTrue("Year index should contain records",
-                        mapContainer.getIndexes().getIndex("year").getRecords(yearOwned).size() > 0);
-            }
-        });
+        assertTrueEventually(() -> assertTrue("Year index should contain records",
+                mapContainer.getIndexes().getIndex("year").getRecords(yearOwned).size() > 0));
     }
 
-    private int numberOfPartitionQueryResults(OperationService operationService, int partitionId,
-                                              String attribute, Comparable value) {
-        QueryPartitionOperation queryOp = new QueryPartitionOperation(
-                Query.of().mapName(mapName)
-                     .iterationType(IterationType.KEY)
-                     .predicate(Predicates.equal(attribute, value)).build());
+    private int numberOfPartitionQueryResults(HazelcastInstance instance, int partitionId, String attribute, Comparable value) {
+        OperationService operationService = getOperationService(instance);
+        Query query = Query.of().mapName(mapName).iterationType(IterationType.KEY).predicate(Predicates.equal(attribute, value))
+                .build();
+        Operation queryOperation = getMapOperationProvider(instance, mapName).createQueryPartitionOperation(query);
         InternalCompletableFuture<QueryResult> future = operationService
-                .invokeOnPartition(MapService.SERVICE_NAME, queryOp, partitionId);
+                .invokeOnPartition(MapService.SERVICE_NAME, queryOperation, partitionId);
         return future.join().size();
     }
 
@@ -218,8 +213,6 @@ public class MapIndexLifecycleTest extends HazelcastTestSupport {
         int partitionCount = getPartitionCount(instance);
         final AtomicInteger authorRecordsCounter = new AtomicInteger();
         final AtomicInteger yearRecordsCounter = new AtomicInteger();
-        final OperationService operationService = getOperationService(instance);
-        boolean isNativeMemoryFormat = context.getMapContainer(mapName).getMapConfig().getInMemoryFormat().equals(NATIVE);
 
         String authorOwned = findAuthorOwnedBy(instance);
         Integer yearOwned = findYearOwnedBy(instance);
@@ -235,7 +228,7 @@ public class MapIndexLifecycleTest extends HazelcastTestSupport {
             RecordStore recordStore = maps.get(mapName);
             assertNotNull("record store is null: ", recordStore);
 
-            if (isNativeMemoryFormat) {
+            if (!globalIndex()) {
                 // also assert contents of partition indexes when NATIVE memory format
                 ConcurrentMap<String, Indexes> indexes = container.getIndexes();
                 final Indexes index = indexes.get(mapName);
@@ -244,12 +237,12 @@ public class MapIndexLifecycleTest extends HazelcastTestSupport {
                 assertNotNull("There should be a partition index for attribute 'author'", index.getIndex("author"));
                 assertNotNull("There should be a partition index for attribute 'year'", index.getIndex("year"));
 
-                authorRecordsCounter.getAndAdd(numberOfPartitionQueryResults(operationService, i, "author", authorOwned));
-                yearRecordsCounter.getAndAdd(numberOfPartitionQueryResults(operationService, i, "year", yearOwned));
+                authorRecordsCounter.getAndAdd(numberOfPartitionQueryResults(instance, i, "author", authorOwned));
+                yearRecordsCounter.getAndAdd(numberOfPartitionQueryResults(instance, i, "year", yearOwned));
             }
         }
 
-        if (isNativeMemoryFormat) {
+        if (!globalIndex()) {
             assertTrue("Author index should contain records", authorRecordsCounter.get() > 0);
             assertTrue("Year index should contain records", yearRecordsCounter.get() > 0);
         }
@@ -257,7 +250,7 @@ public class MapIndexLifecycleTest extends HazelcastTestSupport {
 
     private int getPartitionCount(HazelcastInstance instance) {
         Node node = getNode(instance);
-        return node.getProperties().getInteger(GroupProperty.PARTITION_COUNT);
+        return node.getProperties().getInteger(ClusterProperty.PARTITION_COUNT);
     }
 
     private MapServiceContext getMapServiceContext(HazelcastInstance instance) {
@@ -268,11 +261,11 @@ public class MapIndexLifecycleTest extends HazelcastTestSupport {
 
 
     private HazelcastInstance createNode(TestHazelcastInstanceFactory instanceFactory) {
-        Config config = getConfig().setProperty(GroupProperty.PARTITION_COUNT.getName(), "4");
+        Config config = getConfig().setProperty(ClusterProperty.PARTITION_COUNT.getName(), "4");
         config.getMapConfig(mapName)
-              .addMapIndexConfig(new MapIndexConfig("author", false))
-              .addMapIndexConfig(new MapIndexConfig("year", true))
-              .setBackupCount(1);
+                .addIndexConfig(getIndexConfig("author", false))
+                .addIndexConfig(getIndexConfig("year", true))
+                .setBackupCount(1);
         return instanceFactory.newHazelcastInstance(config);
     }
 
@@ -363,5 +356,9 @@ public class MapIndexLifecycleTest extends HazelcastTestSupport {
 
     private static String getAuthorNameByKey(int key) {
         return String.valueOf(key % 7);
+    }
+
+    private static IndexConfig getIndexConfig(String attribute, boolean ordered) {
+        return new IndexConfig(ordered ? IndexType.SORTED : IndexType.HASH, attribute).setName(attribute);
     }
 }

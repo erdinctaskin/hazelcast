@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,18 +16,14 @@
 
 package com.hazelcast.client.impl;
 
-import com.hazelcast.client.ClientEndpoint;
-import com.hazelcast.client.ClientEndpointManager;
-import com.hazelcast.client.ClientEngine;
-import com.hazelcast.core.ClientType;
 import com.hazelcast.logging.ILogger;
-import com.hazelcast.nio.Connection;
-import com.hazelcast.spi.ExecutionService;
-import com.hazelcast.spi.properties.GroupProperty;
+import com.hazelcast.internal.nio.Connection;
+import com.hazelcast.spi.impl.executionservice.ExecutionService;
+import com.hazelcast.spi.properties.ClusterProperty;
 import com.hazelcast.spi.properties.HazelcastProperties;
-import com.hazelcast.util.Clock;
+import com.hazelcast.internal.util.Clock;
 
-import static com.hazelcast.util.StringUtil.timeToString;
+import static com.hazelcast.internal.util.StringUtil.timeToString;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
@@ -40,24 +36,22 @@ public class ClientHeartbeatMonitor implements Runnable {
     private static final int DEFAULT_CLIENT_HEARTBEAT_TIMEOUT_SECONDS = 60;
 
     private final ClientEndpointManager clientEndpointManager;
-    private final ClientEngine clientEngine;
     private final long heartbeatTimeoutSeconds;
     private final ExecutionService executionService;
     private final ILogger logger;
 
     public ClientHeartbeatMonitor(ClientEndpointManager clientEndpointManager,
-                                  ClientEngine clientEngine,
+                                  ILogger logger,
                                   ExecutionService executionService,
                                   HazelcastProperties hazelcastProperties) {
         this.clientEndpointManager = clientEndpointManager;
-        this.clientEngine = clientEngine;
-        this.logger = clientEngine.getLogger(ClientHeartbeatMonitor.class);
+        this.logger = logger;
         this.executionService = executionService;
         this.heartbeatTimeoutSeconds = getHeartbeatTimeout(hazelcastProperties);
     }
 
     private long getHeartbeatTimeout(HazelcastProperties hazelcastProperties) {
-        long configuredTimeout = hazelcastProperties.getSeconds(GroupProperty.CLIENT_HEARTBEAT_TIMEOUT_SECONDS);
+        long configuredTimeout = hazelcastProperties.getSeconds(ClusterProperty.CLIENT_HEARTBEAT_TIMEOUT_SECONDS);
         if (configuredTimeout > 0) {
             return configuredTimeout;
         }
@@ -74,9 +68,8 @@ public class ClientHeartbeatMonitor implements Runnable {
     public void run() {
         cleanupEndpointsWithDeadConnections();
 
-        String memberUuid = clientEngine.getThisUuid();
         for (ClientEndpoint clientEndpoint : clientEndpointManager.getEndpoints()) {
-            monitor(memberUuid, clientEndpoint);
+            monitor(clientEndpoint);
         }
     }
 
@@ -97,24 +90,16 @@ public class ClientHeartbeatMonitor implements Runnable {
 
     }
 
-    private void monitor(String memberUuid, ClientEndpoint clientEndpoint) {
-        // C++ client sends heartbeat over its non-owner connections
-        // For other client types, disregard non-owner connections for heartbeat monitoring purposes
-        if (clientEndpoint.isOwnerConnection() == ClientType.CPP.equals(clientEndpoint.getClientType())) {
-            return;
-        }
-
+    private void monitor(ClientEndpoint clientEndpoint) {
         Connection connection = clientEndpoint.getConnection();
         long lastTimePacketReceived = connection.lastReadTimeMillis();
         long timeoutInMillis = SECONDS.toMillis(heartbeatTimeoutSeconds);
         long currentTimeMillis = Clock.currentTimeMillis();
         if (lastTimePacketReceived + timeoutInMillis < currentTimeMillis) {
-            if (memberUuid.equals(clientEngine.getOwnerUuid(clientEndpoint.getUuid()))) {
-                String message = "Client heartbeat is timed out, closing connection to " + connection
-                        + ". Now: " + timeToString(currentTimeMillis)
-                        + ". LastTimePacketReceived: " + timeToString(lastTimePacketReceived);
-                connection.close(message, null);
-            }
+            String message = "Client heartbeat is timed out, closing connection to " + connection
+                    + ". Now: " + timeToString(currentTimeMillis)
+                    + ". LastTimePacketReceived: " + timeToString(lastTimePacketReceived);
+            connection.close(message, null);
         }
     }
 }

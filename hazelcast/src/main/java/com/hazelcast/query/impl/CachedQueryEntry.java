@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,16 @@
 
 package com.hazelcast.query.impl;
 
+import com.hazelcast.internal.serialization.Data;
 import com.hazelcast.internal.serialization.InternalSerializationService;
-import com.hazelcast.nio.serialization.Data;
+import com.hazelcast.map.impl.MapDataSerializerHook;
+import com.hazelcast.nio.ObjectDataInput;
+import com.hazelcast.nio.ObjectDataOutput;
+import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 import com.hazelcast.nio.serialization.Portable;
 import com.hazelcast.query.impl.getters.Extractors;
+
+import java.io.IOException;
 
 /**
  * Entry of the Query.
@@ -27,7 +33,7 @@ import com.hazelcast.query.impl.getters.Extractors;
  * @param <K> key
  * @param <V> value
  */
-public class CachedQueryEntry<K, V> extends QueryableEntry<K, V> {
+public class CachedQueryEntry<K, V> extends QueryableEntry<K, V> implements IdentifiedDataSerializable {
 
     protected Data keyData;
     protected Data valueData;
@@ -38,16 +44,18 @@ public class CachedQueryEntry<K, V> extends QueryableEntry<K, V> {
     public CachedQueryEntry() {
     }
 
-    public CachedQueryEntry(InternalSerializationService serializationService, Data key, Object value, Extractors extractors) {
-        init(serializationService, key, value, extractors);
+    public CachedQueryEntry(InternalSerializationService ss,
+                            Data key, Object value, Extractors extractors) {
+        init(ss, key, value, extractors);
     }
 
     @SuppressWarnings("unchecked")
-    public void init(InternalSerializationService serializationService, Data key, Object value, Extractors extractors) {
+    public CachedQueryEntry<K, V> init(InternalSerializationService ss,
+                                       Data key, Object value, Extractors extractors) {
         if (key == null) {
             throw new IllegalArgumentException("keyData cannot be null");
         }
-        this.serializationService = serializationService;
+        this.serializationService = ss;
         this.keyData = key;
         this.keyObject = null;
 
@@ -59,6 +67,7 @@ public class CachedQueryEntry<K, V> extends QueryableEntry<K, V> {
             this.valueData = null;
         }
         this.extractors = extractors;
+        return this;
     }
 
     @Override
@@ -70,16 +79,16 @@ public class CachedQueryEntry<K, V> extends QueryableEntry<K, V> {
     }
 
     @Override
+    public Data getKeyData() {
+        return keyData;
+    }
+
+    @Override
     public V getValue() {
         if (valueObject == null) {
             valueObject = serializationService.toObject(valueData);
         }
         return valueObject;
-    }
-
-    @Override
-    public Data getKeyData() {
-        return keyData;
     }
 
     @Override
@@ -91,18 +100,71 @@ public class CachedQueryEntry<K, V> extends QueryableEntry<K, V> {
     }
 
     @Override
+    public K getKeyIfPresent() {
+        return keyObject != null ? keyObject : null;
+    }
+
+    @Override
+    public Data getKeyDataIfPresent() {
+        return keyData;
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public V getValueIfPresent() {
+        if (valueObject != null) {
+            return valueObject;
+        }
+
+        if (record == null) {
+            return null;
+        }
+
+        Object possiblyNotData = record.getValue();
+
+        return possiblyNotData instanceof Data ? null : (V) possiblyNotData;
+    }
+
+    @Override
+    public Data getValueDataIfPresent() {
+        if (valueData != null) {
+            return valueData;
+        }
+
+        if (record == null) {
+            return null;
+        }
+
+        Object possiblyData = record.getValue();
+
+        return possiblyData instanceof Data ? (Data) possiblyData : null;
+    }
+
+    public Object getByPrioritizingDataValue() {
+        if (valueData != null) {
+            return valueData;
+        }
+
+        if (valueObject != null) {
+            return valueObject;
+        }
+
+        return null;
+    }
+
+    @Override
     protected Object getTargetObject(boolean key) {
         Object targetObject;
         if (key) {
             // keyData is never null
-            if (keyData.isPortable()) {
+            if (keyData.isPortable() || keyData.isJson()) {
                 targetObject = keyData;
             } else {
                 targetObject = getKey();
             }
         } else {
             if (valueObject == null) {
-                if (valueData.isPortable()) {
+                if (valueData.isPortable() || valueData.isJson()) {
                     targetObject = valueData;
                 } else {
                     targetObject = getValue();
@@ -140,4 +202,29 @@ public class CachedQueryEntry<K, V> extends QueryableEntry<K, V> {
         return keyData.hashCode();
     }
 
+    @Override
+    public void writeData(ObjectDataOutput out) throws IOException {
+        out.writeObject(getKey());
+        out.writeObject(getValue());
+    }
+
+    @Override
+    public void readData(ObjectDataInput in) throws IOException {
+        keyObject = in.readObject();
+        valueObject = in.readObject();
+    }
+
+    @Override
+    public int getFactoryId() {
+        return MapDataSerializerHook.F_ID;
+    }
+
+    @Override
+    public int getClassId() {
+        // We are intentionally deserializing CachedQueryEntry as LazyMapEntry
+        // LazyMapEntry is actually a subclass of CacheQueryEntry.
+        // If this sounds surprising, convoluted or just plain wrong
+        // then you are not wrong. Please see commit message for reasoning.
+        return MapDataSerializerHook.LAZY_MAP_ENTRY;
+    }
 }

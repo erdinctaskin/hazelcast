@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@
 
 package com.hazelcast.query.impl;
 
+import com.hazelcast.internal.serialization.Data;
 import com.hazelcast.internal.serialization.InternalSerializationService;
-import com.hazelcast.nio.serialization.Data;
 import com.hazelcast.query.impl.getters.Extractors;
 
 /**
@@ -41,7 +41,7 @@ public class QueryEntry extends QueryableEntry {
      * <pre>
      * <code>Predicate predicate = ...
      * QueryEntry entry = new QueryEntry()
-     * for (i == 0; i < HUGE_NUMBER; i++) {
+     * for (i == 0; i &lt; HUGE_NUMBER; i++) {
      *       entry.init(...)
      *       boolean valid = predicate.apply(queryEntry);
      *
@@ -70,18 +70,50 @@ public class QueryEntry extends QueryableEntry {
     }
 
     @Override
-    public Object getValue() {
-        return serializationService.toObject(value);
-    }
-
-    @Override
     public Data getKeyData() {
         return key;
     }
 
     @Override
+    public Object getValue() {
+        return serializationService.toObject(value);
+    }
+
+    @Override
     public Data getValueData() {
         return serializationService.toData(value);
+    }
+
+    @Override
+    public Object getKeyIfPresent() {
+        return null;
+    }
+
+    @Override
+    public Data getKeyDataIfPresent() {
+        return key;
+    }
+
+    @Override
+    public Object getValueIfPresent() {
+        if (!(value instanceof Data)) {
+            return value;
+        }
+
+        Object possiblyNotData = record.getValue();
+
+        return possiblyNotData instanceof Data ? null : possiblyNotData;
+    }
+
+    @Override
+    public Data getValueDataIfPresent() {
+        if (value instanceof Data) {
+            return (Data) value;
+        }
+
+        Object possiblyData = record.getValue();
+
+        return possiblyData instanceof Data ? (Data) possiblyData : null;
     }
 
     @Override

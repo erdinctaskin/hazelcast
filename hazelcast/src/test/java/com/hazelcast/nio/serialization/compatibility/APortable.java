@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ package com.hazelcast.nio.serialization.compatibility;
 
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
-import com.hazelcast.nio.serialization.Data;
+import com.hazelcast.internal.serialization.Data;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 import com.hazelcast.nio.serialization.Portable;
 import com.hazelcast.nio.serialization.PortableReader;
@@ -26,6 +26,9 @@ import com.hazelcast.nio.serialization.PortableWriter;
 
 import java.io.IOException;
 import java.util.Arrays;
+
+import static com.hazelcast.internal.nio.IOUtil.readData;
+import static com.hazelcast.internal.nio.IOUtil.writeData;
 
 public class APortable implements Portable {
 
@@ -75,6 +78,7 @@ public class APortable implements Portable {
     private Object customByteArraySerializableObject;
     private Data data;
 
+    @SuppressWarnings({"checkstyle:parameternumber", "checkstyle:executablestatementcount"})
     public APortable(boolean bool, byte b, char c, double d, short s,
                      float f, int i, long l, String str, Portable p,
                      boolean[] booleans, byte[] bytes, char[] chars, double[] doubles, short[] shorts,
@@ -143,7 +147,7 @@ public class APortable implements Portable {
         writer.writeFloat("f", f);
         writer.writeInt("i", i);
         writer.writeLong("l", l);
-        writer.writeUTF("str", str);
+        writer.writeString("str", str);
         if (p != null) {
             writer.writePortable("p", p);
         } else {
@@ -157,7 +161,7 @@ public class APortable implements Portable {
         writer.writeFloatArray("fs", floats);
         writer.writeIntArray("is", ints);
         writer.writeLongArray("ls", longs);
-        writer.writeUTFArray("strs", strings);
+        writer.writeStringArray("strs", strings);
         writer.writePortableArray("ps", portables);
 
         writer.writeBooleanArray("booleansNull", booleansNull);
@@ -168,7 +172,7 @@ public class APortable implements Portable {
         writer.writeFloatArray("fsNull", floatsNull);
         writer.writeIntArray("isNull", intsNull);
         writer.writeLongArray("lsNull", longsNull);
-        writer.writeUTFArray("strsNull", stringsNull);
+        writer.writeStringArray("strsNull", stringsNull);
 
         ObjectDataOutput dataOutput = writer.getRawDataOutput();
 
@@ -180,7 +184,7 @@ public class APortable implements Portable {
         dataOutput.writeFloat(f);
         dataOutput.writeInt(i);
         dataOutput.writeLong(l);
-        dataOutput.writeUTF(str);
+        dataOutput.writeString(str);
 
         dataOutput.writeBooleanArray(booleans);
         dataOutput.writeByteArray(bytes);
@@ -217,7 +221,7 @@ public class APortable implements Portable {
         dataOutput.writeObject(customByteArraySerializableObject);
         dataOutput.writeObject(customStreamSerializableObject);
 
-        dataOutput.writeData(data);
+        writeData(dataOutput, data);
     }
 
     public void readPortable(PortableReader reader) throws IOException {
@@ -229,7 +233,7 @@ public class APortable implements Portable {
         f = reader.readFloat("f");
         i = reader.readInt("i");
         l = reader.readLong("l");
-        str = reader.readUTF("str");
+        str = reader.readString("str");
         p = reader.readPortable("p");
 
         booleans = reader.readBooleanArray("booleans");
@@ -240,7 +244,7 @@ public class APortable implements Portable {
         floats = reader.readFloatArray("fs");
         ints = reader.readIntArray("is");
         longs = reader.readLongArray("ls");
-        strings = reader.readUTFArray("strs");
+        strings = reader.readStringArray("strs");
         portables = reader.readPortableArray("ps");
 
         booleansNull = reader.readBooleanArray("booleansNull");
@@ -251,7 +255,7 @@ public class APortable implements Portable {
         floatsNull = reader.readFloatArray("fsNull");
         intsNull = reader.readIntArray("isNull");
         longsNull = reader.readLongArray("lsNull");
-        stringsNull = reader.readUTFArray("strsNull");
+        stringsNull = reader.readStringArray("strsNull");
 
         ObjectDataInput dataInput = reader.getRawDataInput();
 
@@ -263,7 +267,7 @@ public class APortable implements Portable {
         f = dataInput.readFloat();
         i = dataInput.readInt();
         l = dataInput.readLong();
-        str = dataInput.readUTF();
+        str = dataInput.readString();
 
         booleans = dataInput.readBooleanArray();
         bytes = dataInput.readByteArray();
@@ -273,7 +277,7 @@ public class APortable implements Portable {
         floats = dataInput.readFloatArray();
         ints = dataInput.readIntArray();
         longs = dataInput.readLongArray();
-        strings = dataInput.readUTFArray();
+        strings = dataInput.readStringArray();
 
         booleansNull = dataInput.readBooleanArray();
         bytesNull = dataInput.readByteArray();
@@ -283,7 +287,7 @@ public class APortable implements Portable {
         floatsNull = dataInput.readFloatArray();
         intsNull = dataInput.readIntArray();
         longsNull = dataInput.readLongArray();
-        stringsNull = dataInput.readUTFArray();
+        stringsNull = dataInput.readStringArray();
 
         byteSize = dataInput.readByte();
         bytesFully = new byte[byteSize];
@@ -305,7 +309,7 @@ public class APortable implements Portable {
         customByteArraySerializableObject = dataInput.readObject();
         customStreamSerializableObject = dataInput.readObject();
 
-        data = dataInput.readData();
+        data = readData(dataInput);
     }
 
     @Override
@@ -445,6 +449,55 @@ public class APortable implements Portable {
             return false;
         }
         return !(data != null ? !data.equals(that.data) : that.data != null);
+    }
+
+    @Override
+    public int hashCode() {
+        int result;
+        long temp;
+        result = (bool ? 1 : 0);
+        result = 31 * result + (int) b;
+        result = 31 * result + (int) c;
+        temp = Double.doubleToLongBits(d);
+        result = 31 * result + (int) (temp ^ (temp >>> 32));
+        result = 31 * result + (int) s;
+        result = 31 * result + (f != +0.0f ? Float.floatToIntBits(f) : 0);
+        result = 31 * result + i;
+        result = 31 * result + (int) (l ^ (l >>> 32));
+        result = 31 * result + (str != null ? str.hashCode() : 0);
+        result = 31 * result + (p != null ? p.hashCode() : 0);
+        result = 31 * result + Arrays.hashCode(booleans);
+        result = 31 * result + Arrays.hashCode(bytes);
+        result = 31 * result + Arrays.hashCode(chars);
+        result = 31 * result + Arrays.hashCode(doubles);
+        result = 31 * result + Arrays.hashCode(shorts);
+        result = 31 * result + Arrays.hashCode(floats);
+        result = 31 * result + Arrays.hashCode(ints);
+        result = 31 * result + Arrays.hashCode(longs);
+        result = 31 * result + Arrays.hashCode(strings);
+        result = 31 * result + Arrays.hashCode(portables);
+        result = 31 * result + Arrays.hashCode(booleansNull);
+        result = 31 * result + Arrays.hashCode(bytesNull);
+        result = 31 * result + Arrays.hashCode(charsNull);
+        result = 31 * result + Arrays.hashCode(doublesNull);
+        result = 31 * result + Arrays.hashCode(shortsNull);
+        result = 31 * result + Arrays.hashCode(floatsNull);
+        result = 31 * result + Arrays.hashCode(intsNull);
+        result = 31 * result + Arrays.hashCode(longsNull);
+        result = 31 * result + Arrays.hashCode(stringsNull);
+        result = 31 * result + (int) byteSize;
+        result = 31 * result + Arrays.hashCode(bytesFully);
+        result = 31 * result + Arrays.hashCode(bytesOffset);
+        result = 31 * result + Arrays.hashCode(strChars);
+        result = 31 * result + Arrays.hashCode(strBytes);
+        result = 31 * result + unsignedByte;
+        result = 31 * result + unsignedShort;
+        result = 31 * result + (portableObject != null ? portableObject.hashCode() : 0);
+        result = 31 * result + (identifiedDataSerializableObject != null ? identifiedDataSerializableObject.hashCode() : 0);
+        result = 31 * result + (customStreamSerializableObject != null ? customStreamSerializableObject.hashCode() : 0);
+        result = 31 * result + (customByteArraySerializableObject != null ? customByteArraySerializableObject.hashCode() : 0);
+        result = 31 * result + (data != null ? data.hashCode() : 0);
+        return result;
     }
 
     @Override

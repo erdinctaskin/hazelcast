@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2021, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,15 @@
 
 package com.hazelcast.internal.partition;
 
+import com.hazelcast.cluster.Address;
+import com.hazelcast.internal.partition.impl.InternalPartitionImpl;
 import com.hazelcast.internal.partition.impl.PartitionDataSerializerHook;
-import com.hazelcast.nio.Address;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
+import com.hazelcast.nio.serialization.impl.Versioned;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -31,233 +32,193 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static com.hazelcast.internal.partition.InternalPartition.MAX_REPLICA_COUNT;
-import static com.hazelcast.util.StringUtil.LINE_SEPARATOR;
+import static com.hazelcast.internal.serialization.impl.SerializationUtil.readNullableCollection;
+import static com.hazelcast.internal.serialization.impl.SerializationUtil.writeNullableCollection;
+import static com.hazelcast.internal.util.StringUtil.LINE_SEPARATOR;
 
-public final class PartitionRuntimeState implements IdentifiedDataSerializable {
+public final class PartitionRuntimeState implements IdentifiedDataSerializable, Versioned {
 
-    /** Map from address to the replica index of the first partition where the address occurs. Used for writing state. */
-    private Map<Address, Integer> addressToIndexes;
-
-    // used for reading state
-    private Address[] addresses;
-
-    private int[][] minimizedPartitionTable;
-    private int version;
+    private PartitionReplica[] allReplicas;
+    // Partition table encoded as an int matrix.
+    // - 1st dimension index denotes the partitionId [0-partitionCount]
+    // - 2nd dimension index denotes the replicaIndex [0-6]
+    // - value at a point denotes the index of the partition replica in "allReplicas" array,
+    // or -1 if the partition replica is not assigned.
+    private int[][] encodedPartitionTable;
+    private int[] versions;
+    private long stamp;
     private Collection<MigrationInfo> completedMigrations;
     // used to know ongoing migrations when master changed
-    private MigrationInfo activeMigration;
+    private Collection<MigrationInfo> activeMigrations;
 
     /** The sender of the operation which changes the partition table, should be the master node */
-    private Address endpoint;
+    private transient Address master;
 
     public PartitionRuntimeState() {
     }
 
-    public PartitionRuntimeState(InternalPartition[] partitions, Collection<MigrationInfo> migrationInfos, int version) {
-        this.version = version;
-        completedMigrations = migrationInfos != null ? migrationInfos : Collections.<MigrationInfo>emptyList();
-        addressToIndexes = createAddressToIndexMap(partitions);
-        minimizedPartitionTable = createMinimizedPartitionTable(partitions);
+    public PartitionRuntimeState(InternalPartition[] partitions, Collection<MigrationInfo> completedMigrations, long stamp) {
+        this.stamp = stamp;
+        this.completedMigrations = completedMigrations != null ? completedMigrations : Collections.emptyList();
+        Map<PartitionReplica, Integer> replicaToIndexes = createPartitionReplicaToIndexMap(partitions);
+        allReplicas = toPartitionReplicaArray(replicaToIndexes);
+        encodePartitionTable(partitions, replicaToIndexes);
     }
 
-    private int[][] createMinimizedPartitionTable(InternalPartition[] partitions) {
-        int[][] partitionTable = new int[partitions.length][MAX_REPLICA_COUNT];
+    private PartitionReplica[] toPartitionReplicaArray(Map<PartitionReplica, Integer> addressToIndexes) {
+        PartitionReplica[] replicas = new PartitionReplica[addressToIndexes.size()];
+        for (Map.Entry<PartitionReplica, Integer> entry : addressToIndexes.entrySet()) {
+            replicas[entry.getValue()] = entry.getKey();
+        }
+        return replicas;
+    }
+
+    private void encodePartitionTable(InternalPartition[] partitions, Map<PartitionReplica, Integer> replicaToIndexes) {
+        versions = new int[partitions.length];
+        encodedPartitionTable = new int[partitions.length][MAX_REPLICA_COUNT];
 
         for (InternalPartition partition : partitions) {
-            int[] indexes = partitionTable[partition.getPartitionId()];
+            int[] indexes = encodedPartitionTable[partition.getPartitionId()];
+            versions[partition.getPartitionId()] = partition.version();
 
             for (int replicaIndex = 0; replicaIndex < MAX_REPLICA_COUNT; replicaIndex++) {
-                Address address = partition.getReplicaAddress(replicaIndex);
-                if (address == null) {
+                PartitionReplica replica = partition.getReplica(replicaIndex);
+                if (replica == null) {
                     indexes[replicaIndex] = -1;
                 } else {
-                    int index = addressToIndexes.get(address);
+                    int index = replicaToIndexes.get(replica);
                     indexes[replicaIndex] = index;
                 }
             }
         }
-        return partitionTable;
     }
 
-    /** Create a map from address to the replica index on the first partition where the address is a replica */
-    private Map<Address, Integer> createAddressToIndexMap(InternalPartition[] partitions) {
-        Map<Address, Integer> map = new HashMap<Address, Integer>();
+    private static Map<PartitionReplica, Integer> createPartitionReplicaToIndexMap(InternalPartition[] partitions) {
+        Map<PartitionReplica, Integer> map = new HashMap<>();
         int addressIndex = 0;
         for (InternalPartition partition : partitions) {
             for (int i = 0; i < MAX_REPLICA_COUNT; i++) {
-                Address address = partition.getReplicaAddress(i);
-                if (address == null) {
+                PartitionReplica replica = partition.getReplica(i);
+                if (replica == null) {
                     continue;
                 }
-                if (map.containsKey(address)) {
+                if (map.containsKey(replica)) {
                     continue;
                 }
-                map.put(address, addressIndex++);
+                map.put(replica, addressIndex++);
             }
         }
         return map;
     }
 
-    public Address[][] getPartitionTable() {
-        if (addresses == null) {
-            addresses = new Address[addressToIndexes.size()];
-            for (Map.Entry<Address, Integer> entry : addressToIndexes.entrySet()) {
-                addresses[entry.getValue()] = entry.getKey();
-            }
-        }
-
-        int length = minimizedPartitionTable.length;
-        Address[][] result = new Address[length][MAX_REPLICA_COUNT];
+    public InternalPartition[] getPartitions() {
+        int length = encodedPartitionTable.length;
+        InternalPartition[] result = new InternalPartition[length];
         for (int partitionId = 0; partitionId < length; partitionId++) {
-            Address[] replicas = result[partitionId];
-            int[] addressIndexes = minimizedPartitionTable[partitionId];
+            int[] addressIndexes = encodedPartitionTable[partitionId];
+            PartitionReplica[] replicas = new PartitionReplica[MAX_REPLICA_COUNT];
             for (int replicaIndex = 0; replicaIndex < addressIndexes.length; replicaIndex++) {
                 int index = addressIndexes[replicaIndex];
                 if (index != -1) {
-                    Address address = addresses[index];
-                    assert address != null;
-                    replicas[replicaIndex] = address;
+                    PartitionReplica replica = allReplicas[index];
+                    assert replica != null;
+                    replicas[replicaIndex] = replica;
                 }
             }
+            result[partitionId] = new InternalPartitionImpl(partitionId, null, replicas, versions[partitionId], null);
         }
         return result;
     }
 
-    public Address getEndpoint() {
-        return endpoint;
+    public Address getMaster() {
+        return master;
     }
 
-    public void setEndpoint(final Address endpoint) {
-        this.endpoint = endpoint;
+    public void setMaster(Address master) {
+        this.master = master;
     }
 
     public Collection<MigrationInfo> getCompletedMigrations() {
-        return completedMigrations != null ? completedMigrations : Collections.<MigrationInfo>emptyList();
+        return completedMigrations != null ? completedMigrations : Collections.emptyList();
     }
 
-    public MigrationInfo getActiveMigration() {
-        return activeMigration;
+    public Collection<MigrationInfo> getActiveMigrations() {
+        return activeMigrations;
     }
 
-    public void setActiveMigration(MigrationInfo activeMigration) {
-        this.activeMigration = activeMigration;
-    }
-
-    public void setCompletedMigrations(Collection<MigrationInfo> completedMigrations) {
-        this.completedMigrations = completedMigrations;
+    public void setActiveMigrations(Collection<MigrationInfo> activeMigrations) {
+        this.activeMigrations = activeMigrations;
     }
 
     @Override
     public void readData(ObjectDataInput in) throws IOException {
-        version = in.readInt();
+        stamp = in.readLong();
+
         int memberCount = in.readInt();
-        addresses = new Address[memberCount];
+        allReplicas = new PartitionReplica[memberCount];
         for (int i = 0; i < memberCount; i++) {
-            Address address = new Address();
-            address.readData(in);
+            PartitionReplica replica = in.readObject();
             int index = in.readInt();
-            assert addresses[index] == null : "Duplicate address! Address: " + address + ", index: " + index
-                    + ", addresses: " + Arrays.toString(addresses);
-            addresses[index] = address;
+            assert allReplicas[index] == null : "Duplicate replica! Member: " + replica + ", index: " + index
+                    + ", addresses: " + Arrays.toString(allReplicas);
+            allReplicas[index] = replica;
         }
 
         int partitionCount = in.readInt();
-        minimizedPartitionTable = new int[partitionCount][MAX_REPLICA_COUNT];
+        encodedPartitionTable = new int[partitionCount][MAX_REPLICA_COUNT];
+        versions = new int[partitionCount];
         for (int i = 0; i < partitionCount; i++) {
-            int[] indexes = minimizedPartitionTable[i];
+            int[] indexes = encodedPartitionTable[i];
             for (int ix = 0; ix < MAX_REPLICA_COUNT; ix++) {
                 indexes[ix] = in.readInt();
             }
         }
 
-        if (in.readBoolean()) {
-            activeMigration = new MigrationInfo();
-            activeMigration.readData(in);
+        for (int i = 0; i < partitionCount; i++) {
+            versions[i] = in.readInt();
         }
-
-        int k = in.readInt();
-        if (k > 0) {
-            completedMigrations = new ArrayList<MigrationInfo>(k);
-            for (int i = 0; i < k; i++) {
-                MigrationInfo migrationInfo = new MigrationInfo();
-                migrationInfo.readData(in);
-                completedMigrations.add(migrationInfo);
-            }
-        }
+        activeMigrations = readNullableCollection(in);
+        completedMigrations = readNullableCollection(in);
     }
 
-    @SuppressWarnings("checkstyle:npathcomplexity")
     @Override
     public void writeData(ObjectDataOutput out) throws IOException {
-        out.writeInt(version);
-        if (addressToIndexes == null) {
-            out.writeInt(addresses.length);
-            for (int index = 0; index < addresses.length; index++) {
-                Address address = addresses[index];
-                address.writeData(out);
-                out.writeInt(index);
-            }
-        } else {
-            int memberCount = addressToIndexes.size();
-            out.writeInt(memberCount);
-            for (Map.Entry<Address, Integer> entry : addressToIndexes.entrySet()) {
-                Address address = entry.getKey();
-                address.writeData(out);
-                int index = entry.getValue();
-                out.writeInt(index);
-            }
+        out.writeLong(stamp);
+
+        out.writeInt(allReplicas.length);
+        for (int index = 0; index < allReplicas.length; index++) {
+            PartitionReplica replica = allReplicas[index];
+            out.writeObject(replica);
+            out.writeInt(index);
         }
 
-        out.writeInt(minimizedPartitionTable.length);
-        for (int[] indexes : minimizedPartitionTable) {
+        out.writeInt(encodedPartitionTable.length);
+        for (int[] indexes : encodedPartitionTable) {
             for (int ix = 0; ix < MAX_REPLICA_COUNT; ix++) {
                 out.writeInt(indexes[ix]);
             }
         }
 
-        if (activeMigration != null) {
-            out.writeBoolean(true);
-            activeMigration.writeData(out);
-        } else {
-            out.writeBoolean(false);
+        for (int v : versions) {
+            out.writeInt(v);
         }
-
-        if (completedMigrations != null) {
-            int k = completedMigrations.size();
-            out.writeInt(k);
-            for (MigrationInfo migrationInfo : completedMigrations) {
-                migrationInfo.writeData(out);
-            }
-        } else {
-            out.writeInt(0);
-        }
+        writeNullableCollection(activeMigrations, out);
+        writeNullableCollection(completedMigrations, out);
     }
 
     @Override
     public String toString() {
-        StringBuilder sb = new StringBuilder("PartitionRuntimeState [" + version + "]{" + LINE_SEPARATOR);
-
-        if (addressToIndexes == null) {
-            //addressToIndexes is null after deserialization. let's use the array
-            for (Address address : addresses) {
-                sb.append(address).append(LINE_SEPARATOR);
-            }
-        } else {
-            for (Address address : addressToIndexes.keySet()) {
-                sb.append(address).append(LINE_SEPARATOR);
-            }
+        StringBuilder sb = new StringBuilder("PartitionRuntimeState [" + stamp + "]{" + LINE_SEPARATOR);
+        for (PartitionReplica replica : allReplicas) {
+            sb.append(replica).append(LINE_SEPARATOR);
         }
         sb.append(", completedMigrations=").append(completedMigrations);
         sb.append('}');
         return sb.toString();
     }
 
-    public int getVersion() {
-        return version;
-    }
-
-    public void setVersion(int version) {
-        this.version = version;
+    public long getStamp() {
+        return stamp;
     }
 
     @Override
@@ -266,7 +227,7 @@ public final class PartitionRuntimeState implements IdentifiedDataSerializable {
     }
 
     @Override
-    public int getId() {
+    public int getClassId() {
         return PartitionDataSerializerHook.PARTITION_RUNTIME_STATE;
     }
 
