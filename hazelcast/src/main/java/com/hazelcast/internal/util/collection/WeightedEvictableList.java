@@ -93,7 +93,8 @@ public class WeightedEvictableList<T> {
      * @return The node that can be used to vote for
      */
     public WeightedItem<T> addOrVote(T item) {
-        for (WeightedItem<T> weightedItem : list) {
+        for (int i = 0; i < list.size(); i++) {
+            WeightedItem<T> weightedItem = list.get(i);
             if (weightedItem.item.equals(item)) {
                 voteFor(weightedItem);
                 return weightedItem;

@@ -64,7 +64,8 @@ public abstract class AbstractAggregator<I, E, R> implements Aggregator<I, R> {
             @SuppressWarnings("unchecked")
             MultiResult<E> multiResult = (MultiResult<E>) extractedValue;
             List<E> results = multiResult.getResults();
-            for (E result : results) {
+            for (int i = 0; i < results.size(); i++) {
+                E result = results.get(i);
                 if (result == null && multiResult.isNullEmptyTarget() && !nullEmptyTargetSkipped) {
                     // if a null or empty target is reached there will be a single null added to the multi-result.
                     // in aggregators we do not care about this null so we have to skip it.
@@ -72,7 +73,7 @@ public abstract class AbstractAggregator<I, E, R> implements Aggregator<I, R> {
                     nullEmptyTargetSkipped = true;
                     continue;
                 }
-                accumulateExtracted(entry, result);
+                accumulateExtracted(entry, results.get(i));
             }
         } else if (extractedValue != NonTerminalJsonValue.INSTANCE) {
             accumulateExtracted(entry, extractedValue);
